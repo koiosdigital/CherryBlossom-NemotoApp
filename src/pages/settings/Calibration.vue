@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   Card,
@@ -10,13 +10,25 @@ import {
   Button,
   Badge,
 } from '@/components/ui'
-import { ChevronLeft, RefreshCw, Radar } from 'lucide-vue-next'
+import {
+  AlertTriangle,
+  Check,
+  ChevronLeft,
+  Radar,
+  RefreshCw,
+} from 'lucide-vue-next'
 import { useModules } from '@/composables/useModules'
 import { useGrid } from '@/composables/useGrid'
 import CalibrationModal from './CalibrationModal.vue'
 
 const modules = useModules()
 const gridState = useGrid()
+
+onMounted(() => {
+  // Fire in background — each fetch is ~500 ms but they run in parallel.
+  // Populates info.calibrated so rows can surface calibration state.
+  modules.fetchAll().catch(() => {})
+})
 
 const selectedUuid = ref<string | null>(null)
 const modalOpen = ref(false)
@@ -67,6 +79,11 @@ async function discover() {
   }
 }
 
+async function refresh() {
+  await modules.refresh()
+  modules.fetchAll().catch(() => {})
+}
+
 </script>
 
 <template>
@@ -92,7 +109,7 @@ async function discover() {
           </p>
         </div>
         <div class="flex items-center gap-2">
-          <Button variant="outline" size="sm" @click="modules.refresh">
+          <Button variant="outline" size="sm" @click="refresh">
             <RefreshCw />
             Refresh
           </Button>
@@ -152,8 +169,21 @@ async function discover() {
                 <button
                   v-if="moduleAt(x - 1, y - 1)"
                   type="button"
-                  :title="`(${x - 1}, ${y - 1}) · ${moduleAt(x - 1, y - 1)!.uuid}`"
-                  class="flex flex-col items-center justify-between gap-1 rounded-sm border border-border bg-muted/40 p-1.5 transition-colors hover:border-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  :title="
+                    `(${x - 1}, ${y - 1}) · ${moduleAt(x - 1, y - 1)!.uuid}` +
+                    (moduleAt(x - 1, y - 1)?.info
+                      ? moduleAt(x - 1, y - 1)?.info?.calibrated
+                        ? ' · calibrated'
+                        : ' · not calibrated'
+                      : '')
+                  "
+                  class="relative flex flex-col items-center justify-between gap-1 rounded-sm border border-border bg-muted/40 p-1.5 transition-colors hover:border-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="
+                    moduleAt(x - 1, y - 1)?.info &&
+                    !moduleAt(x - 1, y - 1)?.info?.calibrated
+                      ? 'border-amber-500/60'
+                      : ''
+                  "
                   @click="openForUuid(moduleAt(x - 1, y - 1)!.uuid)"
                 >
                   <span
@@ -174,6 +204,17 @@ async function discover() {
                       {{ part }}
                     </span>
                   </span>
+                  <Check
+                    v-if="moduleAt(x - 1, y - 1)?.info?.calibrated"
+                    class="absolute right-0.5 top-0.5 size-2.5 text-emerald-500"
+                  />
+                  <AlertTriangle
+                    v-else-if="
+                      moduleAt(x - 1, y - 1)?.info &&
+                      !moduleAt(x - 1, y - 1)?.info?.calibrated
+                    "
+                    class="absolute right-0.5 top-0.5 size-2.5 text-amber-500"
+                  />
                 </button>
                 <div
                   v-else
@@ -222,6 +263,7 @@ async function discover() {
                 <th>UUID</th>
                 <th class="num">Short ID</th>
                 <th>Status</th>
+                <th>Calibration</th>
                 <th class="w-28"></th>
               </tr>
             </thead>
@@ -243,6 +285,25 @@ async function discover() {
                   <Badge :variant="m.alive ? 'success' : 'warn'">
                     {{ m.alive ? 'alive' : 'quiet' }}
                   </Badge>
+                </td>
+                <td>
+                  <Badge
+                    v-if="m.info?.calibrated"
+                    variant="success"
+                    class="gap-1"
+                  >
+                    <Check class="size-3" />
+                    Done
+                  </Badge>
+                  <Badge
+                    v-else-if="m.info"
+                    variant="warn"
+                    class="gap-1"
+                  >
+                    <AlertTriangle class="size-3" />
+                    Needed
+                  </Badge>
+                  <span v-else class="text-xs text-muted-foreground">—</span>
                 </td>
                 <td>
                   <div class="flex justify-end">

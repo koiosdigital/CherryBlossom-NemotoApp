@@ -5,10 +5,14 @@ import { useWebsocket } from '@/composables/useWebsocket'
 
 type ModuleSummary = components['schemas']['ModuleSummary']
 type ModuleStatus = components['schemas']['ModuleStatus']
+type DeviceInfo = components['schemas']['DeviceInfo']
+type PersistedConfig = components['schemas']['PersistedConfig']
 type ModuleActionRequest = components['schemas']['ModuleActionRequest']
 
 type ModuleEntry = ModuleSummary & {
   status?: ModuleStatus | null
+  info?: DeviceInfo | null
+  persisted?: PersistedConfig | null
 }
 
 const modules = ref<ModuleEntry[]>([])
@@ -61,6 +65,18 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
   })
   ws.on('module.alive', (ev) => patch(ev.data.uuid, (m) => ({ ...m, alive: true })))
   ws.on('module.dead', (ev) => patch(ev.data.uuid, (m) => ({ ...m, alive: false })))
+  ws.on('module.rebooted', (ev) => {
+    // Module just booted — 100 ms detect vs waiting for heartbeat timeout.
+    // Status and persisted cache are now stale; clear them so consumers
+    // don't act on pre-reboot state. Fresh data will arrive via the next
+    // module.status and any consumer calling fetchModule().
+    const { uuid } = ev.data
+    patch(uuid, (m) => ({
+      ...m,
+      alive: true,
+      status: null,
+    }))
+  })
   ws.on('module.status', (ev) =>
     patch(ev.data.uuid, (m) => ({ ...m, status: ev.data.status }))
   )
@@ -93,8 +109,19 @@ export function useModules() {
       params: { path: { uuid } },
     })
     if (err || !data) throw err ?? new Error('fetch module failed')
-    patch(uuid, (m) => ({ ...m, ...data, status: data.status ?? m.status }))
+    patch(uuid, (m) => ({
+      ...m,
+      ...data,
+      status: data.status ?? m.status,
+      info: data.info ?? m.info,
+      persisted: data.persisted ?? m.persisted,
+    }))
     return data
+  }
+
+  async function fetchAll() {
+    const targets = modules.value.map((m) => m.uuid)
+    await Promise.allSettled(targets.map((u) => fetchModule(u)))
   }
 
   async function discover(resetAssignments = false) {
@@ -113,5 +140,6 @@ export function useModules() {
     action,
     discover,
     fetchModule,
+    fetchAll,
   }
 }

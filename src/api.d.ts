@@ -915,16 +915,48 @@ export interface components {
             /** @description Module firmware version "maj.min.patch". */
             fw: string;
             hw_type: number;
-            /** @description Bitfield: bit0 assigned, bit1 homed, bit2 coils_on. */
+            /**
+             * @description Bitfield (raw byte from CAN 0x11 GET_DEVICE_INFO):
+             *       bit 0 — assigned
+             *       bit 1 — homed
+             *       bit 2 — coils_on
+             *       bit 3 — calibrated (also surfaced as `calibrated` boolean)
+             */
             flags: number;
             /** @description Wraps at 65535. */
             uptime_min: number;
+            /** @description Convenience boolean — `(flags >> 3) & 1`. */
+            calibrated: boolean;
+        };
+        /**
+         * @description Module's persisted NVS settings (CAN 0x15 GET_PERSISTED). Survives
+         *     power cycles and module reboots.
+         */
+        PersistedConfig: {
+            /** @description Override for steps-per-flap, in deci-steps. 0 = firmware default. */
+            steps_per_flap_x10: number;
+            /** @description Calibration offset (deci-steps) saved by Calibrate End. */
+            calibration_offset_x10: number;
+            /**
+             * @description Per-module motion style persisted in NVS.
+             * @enum {string}
+             */
+            transition_mode: "minimal" | "full_rotation";
+            /** @description Whether a calibration has been performed and saved to NVS. */
+            calibrated: boolean;
         };
         ModuleDetail: components["schemas"]["ModuleSummary"] & {
             /** @description Fresh poll result, or null if unassigned or CAN timeout. */
             status: components["schemas"]["ModuleStatus"] | null;
             /** @description Fresh firmware info, or null on error. */
             info: components["schemas"]["DeviceInfo"] | null;
+            /**
+             * @description Module's persisted NVS configuration (CAN 0x15 GET_PERSISTED),
+             *     or null if the query failed. The host also seeds its
+             *     per-module Display cache from this so the next frame can
+             *     skip a redundant set_transition push.
+             */
+            persisted: components["schemas"]["PersistedConfig"] | null;
         };
         /** @description POST body for `/api/modules/{uuid}`. Discriminated union on `action`. */
         ModuleActionRequest: components["schemas"]["ActionHome"] | components["schemas"]["ActionCalibrate"] | components["schemas"]["ActionDisplayFlap"] | components["schemas"]["ActionQueueDisplayFlap"] | components["schemas"]["ActionQueueStepTo"] | components["schemas"]["ActionSetQueueDelay"] | components["schemas"]["ActionIdentify"] | components["schemas"]["ActionSetSpeed"] | components["schemas"]["ActionSetAccel"] | components["schemas"]["ActionSetTransition"] | components["schemas"]["ActionSetStepsPerFlap"] | components["schemas"]["ActionReset"];
@@ -1376,7 +1408,7 @@ export interface components {
             ts: number;
         };
         /** @description All server-to-client frames on `/api/ws`. Discriminated on `type`. */
-        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleDead"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventPong"];
+        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleDead"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventPong"];
         /**
          * @description Sent once to a client right after the WebSocket handshake completes.
          *     Gives the frontend a full initial snapshot so it doesn't need to
@@ -1441,6 +1473,37 @@ export interface components {
              * @enum {string}
              */
             type: "module.dead";
+        };
+        /**
+         * @description Fires when a module sends the unsolicited DEVICE_BOOTED frame
+         *     (CAN 0x23) right after CAN init on power-up or reset. Detected in
+         *     ~100 ms instead of waiting for the heartbeat-timeout reassign loop.
+         *     Side effects on receipt: the host's status cache is invalidated and
+         *     the per-module Display setting cache is cleared so the next frame
+         *     re-pushes cycle_type / queue_delay.
+         */
+        WsEventModuleRebooted: components["schemas"]["WsEnvelopeBase"] & {
+            /** @constant */
+            type: "module.rebooted";
+            data: {
+                uuid: components["schemas"]["Uuid"];
+                short_id: components["schemas"]["ShortId"];
+                /**
+                 * @description Raw reset-reason byte from the module (RCC_CSR upper
+                 *     bits on STM32). Bits indicate: power-on, software,
+                 *     watchdog, brown-out, etc. Forwarded verbatim — see the
+                 *     Sakura firmware docs for decoding.
+                 */
+                reset_reason: number;
+                /** @description Module firmware version "maj.min.patch". */
+                fw: string;
+            };
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "module.rebooted";
         };
         /**
          * @description Fires only when the poller observes a diff from the cached status (not

@@ -10,9 +10,10 @@ import {
   Button,
   Badge,
 } from '@/components/ui'
-import { Loader2, Play, Save } from 'lucide-vue-next'
+import { Check, Loader2, Play, Save } from 'lucide-vue-next'
 import { useModules } from '@/composables/useModules'
 import { useToast } from '@/composables/useToast'
+import { useWebsocket } from '@/composables/useWebsocket'
 
 const props = defineProps<{
   open: boolean
@@ -21,6 +22,7 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()
 
 const modules = useModules()
+const ws = useWebsocket()
 const { toast } = useToast()
 
 type State =
@@ -61,6 +63,20 @@ watch(
     })
   }
 )
+
+// If our module reboots mid-flow, bail. Detection is ~100ms via module.rebooted
+// instead of 60s of heartbeat timeout, so we can fail fast with a clear toast.
+ws.on('module.rebooted', (ev) => {
+  if (!props.open || ev.data.uuid !== props.uuid) return
+  if (state.value === 'idle') return
+  state.value = 'error'
+  errorText.value = 'The module rebooted during calibration.'
+  toast({
+    title: 'Module rebooted',
+    description: 'Calibration was interrupted. Start again.',
+    variant: 'warn',
+  })
+})
 
 function waitForHomed(target: boolean, timeoutMs = 60000) {
   return new Promise<void>((resolve, reject) => {
@@ -157,6 +173,9 @@ async function finishAndClose(silent = false) {
         action: 'calibrate',
         param: { step: 'end' },
       })
+      // Refresh so info.calibrated flips to true in the grid + unmapped list
+      // without waiting for a manual refresh.
+      modules.fetchModule(props.uuid).catch(() => {})
       if (!silent) {
         toast({
           title: 'Calibration saved',
@@ -226,6 +245,14 @@ function shortUuid(u: string) {
         </Badge>
         <Badge :variant="status?.homed ? 'success' : 'outline'">
           {{ status?.homed ? 'Homed' : 'Not homed' }}
+        </Badge>
+        <Badge
+          v-if="mod.info?.calibrated"
+          variant="success"
+          class="gap-1"
+        >
+          <Check class="size-3" />
+          Calibrated
         </Badge>
       </div>
 
