@@ -26,13 +26,18 @@ import {
 import {
   ChevronRight,
   Clock as ClockIcon,
+  Cpu,
   Loader2,
   Moon,
   Plus,
   Power,
   Save,
   Trash2,
+  Wifi,
+  WifiLow,
+  WifiOff,
   Wrench,
+  Globe,
   Grid3x3,
 } from 'lucide-vue-next'
 import { apiClient } from '@/api'
@@ -69,6 +74,14 @@ async function loadDevice() {
   if (a.data) about.value = a.data
   if (sys.data) systemInfo.value = sys.data
 }
+
+const signal = computed(() => {
+  const r = systemInfo.value?.wifi_rssi
+  if (r == null) return { label: 'Offline', icon: WifiOff, variant: 'outline' as const }
+  if (r >= -70) return { label: `${r} dBm`, icon: Wifi, variant: 'success' as const }
+  if (r >= -80) return { label: `${r} dBm`, icon: WifiLow, variant: 'warn' as const }
+  return { label: `${r} dBm`, icon: WifiLow, variant: 'warn' as const }
+})
 
 const deviceNameDirty = computed(
   () => !!settings.value && deviceName.value !== settings.value.device_name
@@ -172,23 +185,26 @@ onMounted(() => {
 <template>
   <div class="flex flex-col gap-6">
     <section class="flex flex-col gap-2">
-      <span class="eyebrow">Configuration</span>
       <h1 class="display-face text-3xl font-semibold tracking-tight">
         Settings
       </h1>
-      <p class="max-w-xl text-sm text-muted-foreground">
-        Device identity, quiet hours, setup tools, and power controls.
-      </p>
     </section>
 
     <!-- Device card -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Device</span>
-        <CardTitle>Identity</CardTitle>
-        <CardDescription v-if="about">
-          {{ about.model }} · {{ about.type }} · fw {{ about.version }}
-        </CardDescription>
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex flex-col gap-1">
+            <CardTitle>Identity</CardTitle>
+            <CardDescription v-if="about">
+              {{ about.model }} · firmware {{ about.version }}
+            </CardDescription>
+          </div>
+          <Badge :variant="signal.variant" class="gap-1.5">
+            <component :is="signal.icon" class="size-3" />
+            {{ signal.label }}
+          </Badge>
+        </div>
       </CardHeader>
       <CardContent class="flex flex-col gap-4">
         <div class="flex flex-col gap-1.5 max-w-md">
@@ -212,38 +228,20 @@ onMounted(() => {
         </div>
         <Separator />
         <dl
-          class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3"
+          class="grid grid-cols-2 gap-3 text-sm"
           v-if="systemInfo"
         >
           <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">IP</dt>
-            <dd class="num">{{ systemInfo.ip ?? '—' }}</dd>
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">Hostname</dt>
-            <dd class="num">{{ systemInfo.wifi_ssid ?? '—' }}</dd>
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">RSSI</dt>
-            <dd class="num">
-              {{ systemInfo.wifi_rssi ?? '—' }} dBm
-            </dd>
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">Uptime</dt>
+            <dt class="text-xs text-muted-foreground">Uptime</dt>
             <dd class="num">
               {{ Math.floor(systemInfo.uptime_ms / 3_600_000) }}h
             </dd>
           </div>
           <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">Free heap</dt>
+            <dt class="text-xs text-muted-foreground">Free memory</dt>
             <dd class="num">
               {{ Math.round(systemInfo.free_heap / 1024) }} KB
             </dd>
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">MAC</dt>
-            <dd class="num text-xs">{{ systemInfo.mac ?? '—' }}</dd>
           </div>
         </dl>
       </CardContent>
@@ -254,11 +252,9 @@ onMounted(() => {
       <CardHeader>
         <div class="flex items-start justify-between gap-4">
           <div class="flex flex-col gap-1">
-            <span class="eyebrow">Automation</span>
             <CardTitle>Quiet hours</CardTitle>
             <CardDescription>
-              Schedules tagged "obey quiet hours" won't fire inside these
-              windows.
+              Schedules won't run during these windows.
             </CardDescription>
           </div>
           <Badge v-if="quiet" :variant="quiet.is_quiet_now ? 'warn' : 'outline'">
@@ -346,15 +342,28 @@ onMounted(() => {
     <!-- Setup card (navigation) -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Setup</span>
         <CardTitle>Device setup</CardTitle>
-        <CardDescription>
-          Tools for configuring time, calibrating modules, and laying out the
-          grid.
-        </CardDescription>
       </CardHeader>
       <CardContent class="p-0">
         <nav class="flex flex-col divide-y divide-border">
+          <RouterLink
+            to="/settings/network"
+            class="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/50"
+          >
+            <span
+              class="flex size-9 items-center justify-center rounded-md bg-primary/10 text-primary"
+            >
+              <Globe class="size-4" />
+            </span>
+            <span class="flex min-w-0 flex-1 flex-col">
+              <span class="font-medium">Network</span>
+              <span class="text-xs text-muted-foreground num">
+                {{ systemInfo?.wifi_ssid ?? 'Offline' }}
+                <template v-if="systemInfo?.ip"> · {{ systemInfo.ip }}</template>
+              </span>
+            </span>
+            <ChevronRight class="size-4 text-muted-foreground" />
+          </RouterLink>
           <RouterLink
             to="/settings/time"
             class="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/50"
@@ -390,7 +399,7 @@ onMounted(() => {
               <span class="font-medium">Calibration</span>
               <span class="text-xs text-muted-foreground">
                 {{ modules.length }} module{{ modules.length === 1 ? '' : 's' }}
-                on bus
+                connected
               </span>
             </span>
             <ChevronRight class="size-4 text-muted-foreground" />
@@ -412,6 +421,23 @@ onMounted(() => {
             </span>
             <ChevronRight class="size-4 text-muted-foreground" />
           </RouterLink>
+          <RouterLink
+            to="/settings/modules"
+            class="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/50"
+          >
+            <span
+              class="flex size-9 items-center justify-center rounded-md bg-primary/10 text-primary"
+            >
+              <Cpu class="size-4" />
+            </span>
+            <span class="flex min-w-0 flex-1 flex-col">
+              <span class="font-medium">Modules</span>
+              <span class="text-xs text-muted-foreground">
+                {{ modules.length }} connected · firmware updates
+              </span>
+            </span>
+            <ChevronRight class="size-4 text-muted-foreground" />
+          </RouterLink>
         </nav>
       </CardContent>
     </Card>
@@ -419,11 +445,9 @@ onMounted(() => {
     <!-- Actions (danger) -->
     <Card class="border-destructive/40">
       <CardHeader>
-        <span class="eyebrow text-destructive">Actions</span>
         <CardTitle>Power</CardTitle>
         <CardDescription>
-          Rebooting drops the bus for ~5 seconds and refreshes the discovery
-          cache.
+          Restarts the display. The wall goes blank for a few seconds.
         </CardDescription>
       </CardHeader>
       <CardFooter>
@@ -436,10 +460,10 @@ onMounted(() => {
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Reboot device?</DialogTitle>
+              <DialogTitle>Restart the display?</DialogTitle>
               <DialogDescription>
-                The display will clear and all modules will re-home. Ongoing
-                schedules in the next 10 seconds will miss their fire.
+                The wall will clear and modules will reset. Any schedule due in
+                the next 10 seconds will be skipped.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>

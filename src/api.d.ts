@@ -623,6 +623,174 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bootloader": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current OTA session status
+         * @description Snapshot of the OTA coordinator. Safe to poll. The same payload is
+         *     broadcast over the WebSocket as `bootloader.state_changed` whenever
+         *     the session transitions between FSM states.
+         */
+        get: operations["getBootloader"];
+        put?: never;
+        /**
+         * Upload OTA image (alias for `/upload`)
+         * @description Equivalent to `POST /api/bootloader/upload`. See that endpoint for
+         *     the full contract.
+         */
+        post: operations["uploadBootloaderRoot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bootloader/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current OTA session status (alias)
+         * @description Identical to `GET /api/bootloader`.
+         */
+        get: operations["getBootloaderStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bootloader/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload an OTA firmware image and start a flash session
+         * @description Body MUST be the raw `sakura_firmware_ota.bin` (metadata page + app).
+         *     The first 24 bytes are validated against the SakuraBoot magic
+         *     (`TERRABOOT_RaiseTheWorld\0`); if it doesn't match the upload is
+         *     rejected with `ok:false` and no session is started.
+         *
+         *     On success the session is dispatched to a worker task and the FSM
+         *     moves through `arming → connecting → flashing → finalizing →
+         *     rediscover → success` (or `failed` / `aborted`). Subscribe to the
+         *     WebSocket `bootloader.*` events for live state and progress.
+         *
+         *     ## Failure modes covered
+         *
+         *     * **No app on devices (cold boot):** pass `?assume_in_bl=1` to skip
+         *       the ENTER_BOOTLOADER broadcast — devices already in SakuraBoot
+         *       will respond to CONNECT immediately.
+         *     * **Some devices missed ENTER_BOOTLOADER:** they keep running their
+         *       old firmware and don't appear in `bl_responding`. Re-running the
+         *       OTA picks them up on the next broadcast.
+         *     * **Block ACK timeout:** the host retries each `SEND_BLOCK` up to 3×
+         *       before failing with `block_ack_timeout`.
+         *     * **Devices that don't reboot:** `rediscover` waits 8 s for
+         *       `DEVICE_BOOTED` events; `devices[].came_back=false` flags any
+         *       UUIDs that didn't return.
+         */
+        post: operations["uploadBootloader"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bootloader/abort": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request graceful abort of the running OTA session
+         * @description Sets a flag that the session task observes at safe boundaries
+         *     (between blocks, before each phase). The session ends in the
+         *     `aborted` state. No-op (and `ok:false`) if no session is active.
+         *
+         *     Devices that were partway through receiving blocks remain in
+         *     bootloader mode (they have no valid app), so re-running the OTA is
+         *     safe and recovers them.
+         */
+        post: operations["abortBootloader"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bootloader/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Detect whether any device is currently in SakuraBoot
+         * @description Sends a single Katapult `CONNECT` on the admin channel and reports
+         *     whether at least one device replied. Useful for diagnosing devices
+         *     that boot into the bootloader because they have no valid app
+         *     installed (the bootloader stays put when the app vector table at
+         *     `0x08002400` is invalid).
+         *
+         *     Refuses (`409 Conflict`) if a session is currently active — the
+         *     probe would clash with the OTA's own CONNECT flow.
+         */
+        post: operations["probeBootloader"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bootloader/enter": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Broadcast ENTER_BOOTLOADER without starting an OTA
+         * @description Sends the `0x40` admin broadcast that asks every device to write the
+         *     boot magic and reset into SakuraBoot. Useful for diagnostics, manual
+         *     recovery, or scripting an OTA in two steps. After this fires,
+         *     devices stay in the bootloader (no valid trigger to jump back) until
+         *     a successful `COMPLETE` or another reset.
+         *
+         *     Refuses (`409 Conflict`) if a session is currently active.
+         */
+        post: operations["enterBootloader"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/about": {
         parameters: {
             query?: never;
@@ -1398,6 +1566,145 @@ export interface components {
             /** @description POSIX TZ string suitable for `setenv("TZ", rule, 1)`. */
             rule: string;
         };
+        /**
+         * Format: binary
+         * @description Raw `sakura_firmware_ota.bin`: 1 KB metadata page followed by the
+         *     application binary. Maximum size is the 56 KB flashable region
+         *     (metadata + app, NVS excluded). Block-aligned padding is added by
+         *     the host with `0xFF` if the image isn't a multiple of 64 bytes.
+         */
+        OtaImageBinary: string;
+        /**
+         * @description Top-level FSM state for the OTA coordinator.
+         *     * `idle` — no session ever started, or last one is fully torn down
+         *     * `arming` — broadcast `ENTER_BOOTLOADER`; waiting for devices to reset
+         *     * `connecting` — sending `CONNECT`; waiting for the first ACK
+         *     * `flashing` — streaming `SEND_BLOCK` frames sequentially
+         *     * `finalizing` — `EOF` then `COMPLETE` sent; devices reset themselves
+         *     * `rediscover` — listening for `DEVICE_BOOTED` events from re-flashed devices
+         *     * `success` — terminal: at least one device acked the full sequence
+         *     * `failed` — terminal: see `fail_reason`
+         *     * `aborted` — terminal: user cancelled mid-flight via `/abort`
+         * @enum {string}
+         */
+        BootloaderState: "idle" | "arming" | "connecting" | "flashing" | "finalizing" | "rediscover" | "success" | "failed" | "aborted";
+        /**
+         * @description Discriminator for terminal `failed` state. `none` when the session
+         *     is in-flight or finished successfully.
+         *     * `no_bootloaders` — `CONNECT` got no ACK after retries (devices
+         *       weren't in BL, or bus is offline)
+         *     * `block_ack_timeout` — a `SEND_BLOCK` exhausted retries (default 3)
+         *     * `block_nacked` — bootloader returned `COMMAND_ERROR` (flash write
+         *       failure or out-of-range address)
+         *     * `eof_failed` — `EOF` got no ACK
+         *     * `complete_failed` — `COMPLETE` send failed at the CAN layer
+         *     * `invalid_image` — metadata magic / size validation failed
+         *     * `aborted_by_user` — `/api/bootloader/abort` was honored
+         *     * `internal` — host-side error (e.g. `ENTER_BOOTLOADER` broadcast failed)
+         * @enum {string}
+         */
+        BootloaderFailReason: "none" | "no_bootloaders" | "block_ack_timeout" | "block_nacked" | "eof_failed" | "complete_failed" | "invalid_image" | "aborted_by_user" | "internal";
+        /**
+         * @description Per-device entry from the pre-OTA snapshot. `came_back` flips true
+         *     when the host observes a `DEVICE_BOOTED` event for this UUID after
+         *     `COMPLETE`. `new_fw` is populated only when `came_back=true`.
+         */
+        BootloaderDevice: {
+            uuid: components["schemas"]["Uuid"];
+            short_id: components["schemas"]["ShortId"];
+            /** @description True if assigned to a short_id pre-OTA. */
+            was_assigned: boolean;
+            /** @description True if a DEVICE_BOOTED event was observed post-OTA. */
+            came_back: boolean;
+            /** @description Firmware version reported in the post-OTA boot event; null if no event seen. */
+            new_fw: string | null;
+        };
+        /**
+         * @description Full snapshot of the OTA coordinator. Matches the WebSocket
+         *     `bootloader.state_changed` payload byte-for-byte.
+         */
+        BootloaderStatus: {
+            state: components["schemas"]["BootloaderState"];
+            fail_reason: components["schemas"]["BootloaderFailReason"];
+            /** @description Total uploaded image bytes (incl. 1 KB metadata page). */
+            image_size: number;
+            /** @description Number of 64-byte blocks in the image. */
+            image_blocks: number;
+            /** @description Blocks transmitted so far during `flashing`. */
+            blocks_sent: number;
+            /** @description Blocks the bootloader has acknowledged. Stays ≤ `blocks_sent`. */
+            blocks_acked: number;
+            /** @description Firmware version parsed from the metadata page. */
+            fw: string;
+            /** @description Variant name from metadata (e.g. `sakura`). */
+            variant: string;
+            /** @description Application size in bytes from the metadata page (excludes metadata page itself). */
+            app_size: number;
+            /** @description Number of devices that were assigned a short_id when the session started. */
+            pre_ota_assigned: number;
+            /**
+             * @description Set to 1 once we observe at least one `CONNECT` ACK. Broadcast
+             *     OTA collapses identical responses on the bus, so this is a
+             *     "saw any response" signal rather than a true device count.
+             */
+            bl_responding: number;
+            /** @description Pre-OTA UUIDs that re-announced via `DEVICE_BOOTED` during `rediscover`. */
+            post_ota_back: number;
+            /** @description Pre-OTA snapshot, capped at 132 entries. */
+            devices: components["schemas"]["BootloaderDevice"][];
+            /** @description Human-readable status line; updated on every state transition. */
+            message: string;
+            /** @description Uptime ms when the session began (`esp_timer_get_time()/1000`). 0 if never started. */
+            started_at_ms: number;
+            /** @description Uptime ms when the session ended. 0 if still running or never started. */
+            ended_at_ms: number;
+        };
+        /**
+         * @description Response to `/api/bootloader/upload`. `ok=false` means the image
+         *     failed validation (bad magic, too small, etc.) — no session was
+         *     started. `ok=true` means the session is now running asynchronously;
+         *     poll `GET /api/bootloader` or subscribe to the WebSocket to follow
+         *     progress.
+         */
+        BootloaderUploadResponse: {
+            /** @constant */
+            ok: false;
+            /** @description Validation failure detail. */
+            error: string;
+        } | {
+            /** @constant */
+            ok: true;
+            state: components["schemas"]["BootloaderState"];
+            image_size: number;
+            image_blocks: number;
+            fw: string;
+            variant: string;
+        };
+        BootloaderAbortResponse: {
+            /** @description True if an active session was flagged for abort. False if no session was active. */
+            ok: boolean;
+            /** @enum {string} */
+            detail: "abort requested" | "no active session";
+        };
+        /**
+         * @description Response to `/api/bootloader/probe`. The optional fields are only
+         *     present when `any_in_bootloader=true`.
+         */
+        BootloaderProbeResponse: {
+            /** @constant */
+            ok: true;
+            any_in_bootloader: boolean;
+            /** @description Bootloader protocol version, hex (e.g. `0x10100`). */
+            proto?: string;
+            /** @description Bootloader-reported app start address (typically 0x08002000). */
+            app_addr?: number;
+            /** @description Bootloader-reported block size (typically 64). */
+            block_size?: number;
+        };
+        BootloaderEnterResponse: {
+            ok: boolean;
+            detail: string;
+        };
         WsEnvelopeBase: {
             type: string;
             /**
@@ -1408,7 +1715,7 @@ export interface components {
             ts: number;
         };
         /** @description All server-to-client frames on `/api/ws`. Discriminated on `type`. */
-        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleDead"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventPong"];
+        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleDead"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventBootloaderStateChanged"] | components["schemas"]["WsEventBootloaderProgress"] | components["schemas"]["WsEventPong"];
         /**
          * @description Sent once to a client right after the WebSocket handshake completes.
          *     Gives the frontend a full initial snapshot so it doesn't need to
@@ -1675,6 +1982,43 @@ export interface components {
              */
             type: "quiet_hours.changed";
         };
+        /**
+         * @description Fires every time the OTA FSM transitions (e.g. `arming → connecting`,
+         *     `flashing → finalizing`) and on terminal states. Payload mirrors
+         *     `GET /api/bootloader` — clients can replace local state wholesale.
+         */
+        WsEventBootloaderStateChanged: components["schemas"]["WsEnvelopeBase"] & {
+            /** @constant */
+            type: "bootloader.state_changed";
+            data: components["schemas"]["BootloaderStatus"];
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "bootloader.state_changed";
+        };
+        /**
+         * @description Lightweight progress beacon emitted during `flashing` (≈ every 32
+         *     blocks plus on the last block). Sent on its own to avoid flooding
+         *     the WS with full-status payloads while ~880 blocks stream past.
+         */
+        WsEventBootloaderProgress: components["schemas"]["WsEnvelopeBase"] & {
+            /** @constant */
+            type: "bootloader.progress";
+            data: {
+                state: components["schemas"]["BootloaderState"];
+                blocks_sent: number;
+                blocks_acked: number;
+                image_blocks: number;
+            };
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "bootloader.progress";
+        };
         WsEventPong: components["schemas"]["WsEnvelopeBase"] & {
             /** @constant */
             type: "pong";
@@ -1740,10 +2084,41 @@ export interface components {
                 "application/json": components["schemas"]["QuietHoursError"];
             };
         };
+        /**
+         * @description An OTA session is already in progress (or this endpoint refuses
+         *     while one is). Body is plain text.
+         */
+        BootloaderConflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /**
+         * @description Uploaded image exceeds the 56 KB flashable region (metadata page +
+         *     application). Body is plain text.
+         */
+        BootloaderImageTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
     };
     parameters: {
         UuidPath: components["schemas"]["Uuid"];
         IdPath: number;
+        /**
+         * @description When truthy (`1`/`t`/`T`), skip the broadcast `ENTER_BOOTLOADER` step
+         *     and go straight to `CONNECT`. Use this when devices are already in
+         *     SakuraBoot — typically because they have no valid application
+         *     installed and the bootloader auto-stays.
+         */
+        AssumeInBlQuery: "0" | "1" | "t" | "T" | "true" | "false";
     };
     requestBodies: never;
     headers: never;
@@ -2820,6 +3195,201 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    getBootloader: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderStatus"];
+                };
+            };
+        };
+    };
+    uploadBootloaderRoot: {
+        parameters: {
+            query?: {
+                /**
+                 * @description When truthy (`1`/`t`/`T`), skip the broadcast `ENTER_BOOTLOADER` step
+                 *     and go straight to `CONNECT`. Use this when devices are already in
+                 *     SakuraBoot — typically because they have no valid application
+                 *     installed and the bootloader auto-stays.
+                 */
+                assume_in_bl?: components["parameters"]["AssumeInBlQuery"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": components["schemas"]["OtaImageBinary"];
+            };
+        };
+        responses: {
+            /** @description Upload accepted (validation may still fail — check `ok`). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderUploadResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Socket receive timeout while reading the image body. */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            409: components["responses"]["BootloaderConflict"];
+            413: components["responses"]["BootloaderImageTooLarge"];
+            500: components["responses"]["ServerError"];
+        };
+    };
+    getBootloaderStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Status snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderStatus"];
+                };
+            };
+        };
+    };
+    uploadBootloader: {
+        parameters: {
+            query?: {
+                /**
+                 * @description When truthy (`1`/`t`/`T`), skip the broadcast `ENTER_BOOTLOADER` step
+                 *     and go straight to `CONNECT`. Use this when devices are already in
+                 *     SakuraBoot — typically because they have no valid application
+                 *     installed and the bootloader auto-stays.
+                 */
+                assume_in_bl?: components["parameters"]["AssumeInBlQuery"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": components["schemas"]["OtaImageBinary"];
+            };
+        };
+        responses: {
+            /**
+             * @description Image was received and parsed. Inspect `ok`: if false, `error`
+             *     describes the validation failure (and no session was started).
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderUploadResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Socket receive timeout while reading the image body. */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            409: components["responses"]["BootloaderConflict"];
+            413: components["responses"]["BootloaderImageTooLarge"];
+            500: components["responses"]["ServerError"];
+        };
+    };
+    abortBootloader: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderAbortResponse"];
+                };
+            };
+        };
+    };
+    probeBootloader: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Probe result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderProbeResponse"];
+                };
+            };
+            409: components["responses"]["BootloaderConflict"];
+        };
+    };
+    enterBootloader: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BootloaderEnterResponse"];
+                };
+            };
+            409: components["responses"]["BootloaderConflict"];
         };
     };
     getAbout: {

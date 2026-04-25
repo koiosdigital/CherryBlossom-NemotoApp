@@ -5,7 +5,6 @@ import {
   Card,
   CardHeader,
   CardTitle,
-  CardDescription,
   CardContent,
   Button,
   Badge,
@@ -97,15 +96,13 @@ async function refresh() {
     </RouterLink>
 
     <section class="flex flex-col gap-2">
-      <span class="eyebrow">Setup</span>
       <div class="flex flex-wrap items-end justify-between gap-4">
         <div class="flex flex-col gap-1">
           <h1 class="display-face text-3xl font-semibold tracking-tight">
             Calibration
           </h1>
           <p class="max-w-xl text-sm text-muted-foreground">
-            Pick a module to align its flap offset. Tap a mapped cell on the
-            board, or an unmapped module below.
+            Tap a module to line up its flaps.
           </p>
         </div>
         <div class="flex items-center gap-2">
@@ -124,14 +121,9 @@ async function refresh() {
     <!-- Mapped grid -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Mapped modules</span>
         <CardTitle>
           {{ gridSize.width }} × {{ gridSize.height }} board
         </CardTitle>
-        <CardDescription>
-          Each cell corresponds to a position on the physical display. Empty
-          cells have no module mapped.
-        </CardDescription>
       </CardHeader>
       <CardContent>
         <div
@@ -238,19 +230,10 @@ async function refresh() {
     <!-- Unmapped modules -->
     <Card>
       <CardHeader>
-        <div class="flex items-center justify-between gap-4">
-          <div class="flex flex-col gap-1">
-            <span class="eyebrow">Unmapped modules</span>
-            <CardTitle>
-              {{ unmapped.length }}
-              module{{ unmapped.length === 1 ? '' : 's' }} on bus
-            </CardTitle>
-            <CardDescription>
-              Discovered but not placed in the grid. You can still calibrate
-              them here.
-            </CardDescription>
-          </div>
-        </div>
+        <CardTitle>
+          {{ unmapped.length }} unplaced
+          module{{ unmapped.length === 1 ? '' : 's' }}
+        </CardTitle>
       </CardHeader>
       <CardContent class="px-0">
         <div v-if="unmapped.length" class="overflow-x-auto">

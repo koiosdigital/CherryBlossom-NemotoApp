@@ -285,16 +285,14 @@ async function resetGrid() {
     </RouterLink>
 
     <section class="flex flex-col gap-2">
-      <span class="eyebrow">Setup</span>
       <div class="flex flex-wrap items-end justify-between gap-4">
         <div class="flex flex-col gap-1">
           <h1 class="display-face text-3xl font-semibold tracking-tight">
             Grid management
           </h1>
           <p class="max-w-xl text-sm text-muted-foreground">
-            Place each module at its physical position on the wall. Use
-            Identify to show a different letter on each unplaced module, then
-            tap the cell that matches.
+            Lay out where each module sits on the wall. Use Identify to label
+            unplaced modules, then tap their cell.
           </p>
         </div>
         <Button variant="ghost" size="sm" @click="gridState.refresh">
@@ -307,10 +305,9 @@ async function resetGrid() {
     <!-- Dimensions -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Dimensions</span>
         <CardTitle>Board size</CardTitle>
         <CardDescription>
-          Cells outside the new size are dropped. Save to persist the change.
+          Cells outside the new size are removed.
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-wrap items-end gap-4">
@@ -354,11 +351,10 @@ async function resetGrid() {
       <CardHeader>
         <div class="flex items-start justify-between gap-4">
           <div class="flex flex-col gap-1">
-            <span class="eyebrow">Identify</span>
-            <CardTitle>Light up unplaced modules</CardTitle>
+            <CardTitle>Identify unplaced modules</CardTitle>
             <CardDescription>
-              Shows a distinct letter on each unplaced module so you can see
-              which is which on the wall. Run again after placing a batch.
+              Shows a different letter on each unplaced module so you can tell
+              them apart on the wall.
             </CardDescription>
           </div>
           <Badge variant="outline">
@@ -384,12 +380,11 @@ async function resetGrid() {
     <!-- Mapped grid -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Board</span>
         <CardTitle>
           {{ gridSize.width }} × {{ gridSize.height }}
         </CardTitle>
         <CardDescription>
-          Tap a cell to assign or remove a module.
+          Tap a cell to add or remove a module.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -467,9 +462,8 @@ async function resetGrid() {
     <!-- Unmapped list -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Unplaced modules</span>
         <CardTitle>
-          {{ unmapped.length }} available
+          {{ unmapped.length }} unplaced
         </CardTitle>
       </CardHeader>
       <CardContent class="px-0">

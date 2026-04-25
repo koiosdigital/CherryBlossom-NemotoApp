@@ -359,7 +359,6 @@ onBeforeUnmount(() => {
           Back
         </Button>
         <div class="flex flex-col">
-          <span class="eyebrow">Editor</span>
           <h1 class="display-face text-xl font-semibold tracking-tight">
             {{ title }}
           </h1>

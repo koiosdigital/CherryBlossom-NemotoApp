@@ -105,13 +105,9 @@ const activity = [
 <template>
   <div class="flex flex-col gap-8">
     <section class="flex flex-col gap-2">
-      <span class="eyebrow">Control plane</span>
       <h1 class="display-face text-3xl font-semibold tracking-tight">
         Display overview
       </h1>
-      <p class="max-w-xl text-sm text-muted-foreground">
-        Live state of the wall.
-      </p>
     </section>
 
     <!-- HERO: full-width live display preview -->
@@ -120,7 +116,7 @@ const activity = [
         v-if="display.currentPresetName.value"
         class="flex items-baseline gap-2"
       >
-        <span class="eyebrow">Preset</span>
+        <span class="text-sm text-muted-foreground">Showing</span>
         <span class="display-face text-lg font-medium">
           {{ display.currentPresetName.value }}
         </span>
@@ -173,7 +169,7 @@ const activity = [
     <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <Card>
         <CardContent class="flex flex-col gap-2 py-5">
-          <span class="eyebrow">Modules online</span>
+          <span class="text-sm text-muted-foreground">Modules online</span>
           <div class="flex items-baseline gap-2">
             <span class="display-face text-2xl font-semibold num">
               {{ modules.modules.value.filter((m) => m.alive).length }}
@@ -186,7 +182,7 @@ const activity = [
       </Card>
       <Card>
         <CardContent class="flex flex-col gap-2 py-5">
-          <span class="eyebrow">Grid size</span>
+          <span class="text-sm text-muted-foreground">Grid size</span>
           <div class="flex items-baseline gap-2">
             <span class="display-face text-2xl font-semibold num">
               {{ gridSize.width }} × {{ gridSize.height }}
@@ -196,7 +192,7 @@ const activity = [
       </Card>
       <Card>
         <CardContent class="flex flex-col gap-2 py-5">
-          <span class="eyebrow">Mapped cells</span>
+          <span class="text-sm text-muted-foreground">Mapped cells</span>
           <div class="flex items-baseline gap-2">
             <span class="display-face text-2xl font-semibold num">
               {{ gridState.grid.value?.mapping.length ?? 0 }}
@@ -209,12 +205,11 @@ const activity = [
       </Card>
       <Card>
         <CardContent class="flex flex-col gap-2 py-5">
-          <span class="eyebrow">Catalog</span>
+          <span class="text-sm text-muted-foreground">Flaps</span>
           <div class="flex items-baseline gap-2">
             <span class="display-face text-2xl font-semibold num">
               {{ flaps.flaps.value.length }}
             </span>
-            <span class="text-xs text-muted-foreground">flaps</span>
           </div>
         </CardContent>
       </Card>
@@ -222,7 +217,7 @@ const activity = [
 
     <Card>
       <CardContent class="py-4">
-        <span class="eyebrow">Recent activity</span>
+        <h2 class="text-sm font-medium">Recent activity</h2>
         <ol class="mt-3 flex flex-col gap-3">
           <li
             v-for="(a, i) in activity"

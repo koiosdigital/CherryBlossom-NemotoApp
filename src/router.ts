@@ -7,6 +7,8 @@ const Settings = () => import('@/pages/Settings.vue')
 const SettingsTime = () => import('@/pages/settings/Time.vue')
 const SettingsCalibration = () => import('@/pages/settings/Calibration.vue')
 const SettingsGrid = () => import('@/pages/settings/Grid.vue')
+const SettingsModules = () => import('@/pages/settings/Modules.vue')
+const SettingsNetwork = () => import('@/pages/settings/Network.vue')
 const Editor = () => import('@/pages/Editor.vue')
 
 export const router = createRouter({
@@ -23,6 +25,16 @@ export const router = createRouter({
       component: SettingsCalibration,
     },
     { path: '/settings/grid', name: 'settings.grid', component: SettingsGrid },
+    {
+      path: '/settings/modules',
+      name: 'settings.modules',
+      component: SettingsModules,
+    },
+    {
+      path: '/settings/network',
+      name: 'settings.network',
+      component: SettingsNetwork,
+    },
     { path: '/editor', name: 'editor', component: Editor },
   ],
 })

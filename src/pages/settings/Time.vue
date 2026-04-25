@@ -48,8 +48,6 @@ const deviceDate = computed(() =>
     day: '2-digit',
   }).format(new Date(nowTick.value))
 )
-const browserTz = computed(() => Intl.DateTimeFormat().resolvedOptions().timeZone)
-
 // ---------- timezone picker (local copy of config) ----------
 const autoTz = ref(false)
 const selectedRule = ref('')
@@ -105,9 +103,8 @@ async function saveTz() {
   }
 }
 
-// ---------- ntp + hostname (local copy of config) ----------
+// ---------- ntp (local copy of config) ----------
 const ntpServer = ref('')
-const hostname = ref('')
 const ntpSaving = ref(false)
 
 watch(
@@ -115,7 +112,6 @@ watch(
   (c) => {
     if (!c) return
     ntpServer.value = c.ntp_server
-    hostname.value = c.wifi_hostname
   },
   { immediate: true }
 )
@@ -123,18 +119,13 @@ watch(
 const ntpDirty = computed(() => {
   const c = time.systemConfig.value
   if (!c) return false
-  return (
-    ntpServer.value !== c.ntp_server || hostname.value !== c.wifi_hostname
-  )
+  return ntpServer.value !== c.ntp_server
 })
 
 async function saveNtp() {
   ntpSaving.value = true
   try {
-    await time.updateConfig({
-      ntp_server: ntpServer.value,
-      wifi_hostname: hostname.value,
-    })
+    await time.updateConfig({ ntp_server: ntpServer.value })
   } finally {
     ntpSaving.value = false
   }
@@ -152,14 +143,9 @@ async function saveNtp() {
     </RouterLink>
 
     <section class="flex flex-col gap-2">
-      <span class="eyebrow">Setup</span>
       <h1 class="display-face text-3xl font-semibold tracking-tight">
         Time &amp; timezone
       </h1>
-      <p class="max-w-xl text-sm text-muted-foreground">
-        The display renders times in the device's timezone. The browser stays
-        on {{ browserTz }}.
-      </p>
     </section>
 
     <!-- Live clock -->
@@ -167,7 +153,6 @@ async function saveNtp() {
       <CardHeader>
         <div class="flex items-start justify-between gap-4">
           <div class="flex flex-col gap-1">
-            <span class="eyebrow">Live clock</span>
             <CardTitle class="num text-4xl tabular-nums">
               {{ deviceNow }}
             </CardTitle>
@@ -180,33 +165,23 @@ async function saveNtp() {
             "
           >
             <span class="status-dot" />
-            {{ time.synced.value ? 'NTP synced' : 'NTP not synced' }}
+            {{ time.synced.value ? 'Time synced' : 'Time not synced' }}
           </span>
         </div>
       </CardHeader>
       <CardContent>
-        <dl class="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+        <dl class="grid grid-cols-2 gap-4 text-sm">
           <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">Device zone</dt>
+            <dt class="text-xs text-muted-foreground">Timezone</dt>
             <dd class="truncate font-medium">
               {{ time.ianaTimezone.value ?? '—' }}
             </dd>
           </div>
           <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">POSIX rule</dt>
-            <dd class="num truncate text-xs">
-              {{ time.systemConfig.value?.timezone ?? '—' }}
-            </dd>
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">NTP server</dt>
+            <dt class="text-xs text-muted-foreground">Time server</dt>
             <dd class="num truncate text-xs">
               {{ time.systemConfig.value?.ntp_server ?? '—' }}
             </dd>
-          </div>
-          <div class="flex flex-col gap-0.5">
-            <dt class="eyebrow">Browser zone</dt>
-            <dd class="num truncate text-xs">{{ browserTz }}</dd>
           </div>
         </dl>
       </CardContent>
@@ -221,21 +196,16 @@ async function saveNtp() {
     <!-- Timezone -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Location</span>
         <CardTitle>Timezone</CardTitle>
-        <CardDescription>
-          Sets the timezone used for schedule cron evaluation and display
-          formatting.
-        </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-col gap-4">
         <div
           class="flex items-center justify-between gap-4 rounded-md border border-border bg-muted/30 p-3"
         >
           <div class="flex flex-col">
-            <span class="text-sm font-medium">Auto timezone</span>
+            <span class="text-sm font-medium">Set automatically</span>
             <span class="text-xs text-muted-foreground">
-              Derive from geolocation. The manual picker below is ignored.
+              Pick from your location. The manual picker below is ignored.
             </span>
           </div>
           <Switch v-model="autoTz" />
@@ -323,27 +293,18 @@ async function saveNtp() {
       </CardFooter>
     </Card>
 
-    <!-- NTP + hostname -->
     <Card>
       <CardHeader>
-        <span class="eyebrow">Network</span>
-        <CardTitle>NTP &amp; hostname</CardTitle>
+        <CardTitle>Time server</CardTitle>
         <CardDescription>
-          The device re-syncs against the NTP server on boot and periodically
-          thereafter.
+          Where the display gets its time. It re-syncs at boot and every few
+          hours.
         </CardDescription>
       </CardHeader>
-      <CardContent class="flex flex-col gap-3">
+      <CardContent>
         <div class="flex flex-col gap-1.5 max-w-md">
-          <Label for="ntp">NTP server</Label>
+          <Label for="ntp">Server</Label>
           <Input id="ntp" v-model="ntpServer" placeholder="pool.ntp.org" />
-        </div>
-        <div class="flex flex-col gap-1.5 max-w-md">
-          <Label for="hostname">WiFi hostname</Label>
-          <Input id="hostname" v-model="hostname" placeholder="splitflap" />
-          <p class="text-xs text-muted-foreground">
-            Advertised over DHCP and mDNS. 1–63 characters.
-          </p>
         </div>
       </CardContent>
       <CardFooter class="justify-end">

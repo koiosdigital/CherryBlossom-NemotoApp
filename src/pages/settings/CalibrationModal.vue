@@ -25,22 +25,9 @@ const modules = useModules()
 const ws = useWebsocket()
 const { toast } = useToast()
 
-type State =
-  | 'idle'
-  | 'homing'
-  | 'resetting'
-  | 'rehoming'
-  | 'calibrating'
-  | 'saving'
-  | 'error'
+type State = 'idle' | 'homing' | 'calibrating' | 'saving' | 'error'
 const state = ref<State>('idle')
 
-const preparing = computed(
-  () =>
-    state.value === 'homing' ||
-    state.value === 'resetting' ||
-    state.value === 'rehoming'
-)
 const pendingJog = ref<number | null>(null)
 const errorText = ref<string | null>(null)
 
@@ -115,20 +102,9 @@ async function startCalibration() {
   const uuid = props.uuid
   errorText.value = null
   try {
-    // 1. Home to a known reference point.
     state.value = 'homing'
     await homeAndWait(uuid)
 
-    // 2. Clear any prior offset so we start from a clean baseline.
-    state.value = 'resetting'
-    await modules.action(uuid, { action: 'calibrate', param: { step: 'start' } })
-    await modules.action(uuid, { action: 'calibrate', param: { step: 'end' } })
-
-    // 3. Rehome against the new baseline.
-    state.value = 'rehoming'
-    await homeAndWait(uuid)
-
-    // 4. Open a fresh session for the user's jog adjustments.
     await modules.action(uuid, { action: 'calibrate', param: { step: 'start' } })
     state.value = 'calibrating'
   } catch (e) {
@@ -203,9 +179,6 @@ function onOpenChange(next: boolean) {
   }
 }
 
-function shortUuid(u: string) {
-  return u.slice(0, 4) + '…' + u.slice(-4)
-}
 </script>
 
 <template>
@@ -215,7 +188,7 @@ function shortUuid(u: string) {
         <DialogTitle>
           Calibrate module
           <span v-if="mod" class="num text-muted-foreground">
-            · {{ shortUuid(mod.uuid) }}
+            · {{ mod.uuid }}
           </span>
         </DialogTitle>
         <DialogDescription>
@@ -223,7 +196,7 @@ function shortUuid(u: string) {
             The module will reset to its home position, then you'll line up
             the letter A.
           </template>
-          <template v-else-if="preparing">
+          <template v-else-if="state === 'homing'">
             Resetting the module to its home position.
           </template>
           <template v-else-if="state === 'calibrating'">
@@ -271,7 +244,7 @@ function shortUuid(u: string) {
       </div>
 
       <div
-        v-else-if="preparing"
+        v-else-if="state === 'homing'"
         class="flex flex-col items-center gap-2 rounded-md border border-border bg-muted/30 p-6"
       >
         <Loader2 class="size-5 animate-spin text-primary" />
@@ -279,7 +252,7 @@ function shortUuid(u: string) {
       </div>
 
       <div v-else-if="state === 'calibrating'" class="flex flex-col gap-2">
-        <p class="eyebrow">Move forward</p>
+        <p class="text-xs text-muted-foreground">Move forward</p>
         <div class="flex flex-col gap-2">
           <Button
             v-for="n in [5000, 1000, 100]"
@@ -315,7 +288,7 @@ function shortUuid(u: string) {
         <Button
           v-else
           variant="ghost"
-          :disabled="preparing || state === 'saving'"
+          :disabled="state === 'homing' || state === 'saving'"
           @click="emit('update:open', false)"
         >
           Close

@@ -111,14 +111,13 @@ onMounted(load)
 <template>
   <div class="flex flex-col gap-6">
     <section class="flex flex-col gap-2">
-      <span class="eyebrow">Library</span>
       <div class="flex flex-wrap items-end justify-between gap-4">
         <div class="flex flex-col gap-1">
           <h1 class="display-face text-3xl font-semibold tracking-tight">
             Presets
           </h1>
           <p class="max-w-xl text-sm text-muted-foreground">
-            Saved frames. Show one on demand or edit it in the paint tool.
+            Saved displays you can show on demand.
           </p>
         </div>
         <RouterLink to="/editor?context=new-preset">
