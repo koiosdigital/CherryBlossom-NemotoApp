@@ -5,6 +5,7 @@ import {
   Button,
   Input,
   Label,
+  Switch,
   Separator,
   Dialog,
   DialogContent,
@@ -27,6 +28,7 @@ import { apiClient } from '@/api'
 import { useGrid } from '@/composables/useGrid'
 import { useFlaps } from '@/composables/useFlaps'
 import { useDisplay } from '@/composables/useDisplay'
+import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { useToast } from '@/composables/useToast'
 import { friendlyError } from '@/lib/errors'
 
@@ -35,7 +37,13 @@ const router = useRouter()
 const gridState = useGrid()
 const flaps = useFlaps()
 const display = useDisplay()
+const displaySettings = useDisplaySettings()
 const { toast } = useToast()
+
+// ---------- per-frame effect override (display mode only) ----------
+const overrideEnabled = ref(false)
+const overrideEffect = ref<string>('')
+const overrideDelay = ref<number>(0)
 
 // ---------- context ----------
 type Kind = 'display' | 'new-preset' | 'edit-preset'
@@ -285,9 +293,16 @@ async function save() {
   saving.value = true
   try {
     if (kind.value === 'display') {
-      const { error: err } = await apiClient.POST('/api/display', {
-        body: { flaps: cells.value },
-      })
+      const body: {
+        flaps: number[][]
+        effect?: string
+        delay?: number
+      } = { flaps: cells.value }
+      if (overrideEnabled.value) {
+        if (overrideEffect.value) body.effect = overrideEffect.value
+        if (overrideDelay.value > 0) body.delay = overrideDelay.value
+      }
+      const { error: err } = await apiClient.POST('/api/display', { body })
       if (err) throw err
       toast({ title: 'Display updated', variant: 'success' })
       dirty.value = false
@@ -377,6 +392,59 @@ onBeforeUnmount(() => {
         {{ saveLabel }}
       </Button>
     </div>
+
+    <!-- Per-frame effect override (display mode only) -->
+    <details
+      v-if="kind === 'display'"
+      class="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-sm"
+    >
+      <summary
+        class="cursor-pointer list-none text-xs text-muted-foreground hover:text-foreground"
+      >
+        Effect override (uses default effect if off)
+      </summary>
+      <div class="mt-3 flex flex-col gap-3">
+        <div class="flex items-center gap-2">
+          <Switch id="override_on" v-model="overrideEnabled" />
+          <Label for="override_on" class="cursor-pointer">
+            Override for this push
+          </Label>
+        </div>
+        <div
+          v-if="overrideEnabled"
+          class="flex flex-col gap-3 sm:flex-row sm:items-end"
+        >
+          <div class="flex flex-col gap-1.5">
+            <Label for="override_effect">Effect</Label>
+            <select
+              id="override_effect"
+              v-model="overrideEffect"
+              class="h-9 w-48 rounded-md border border-border bg-card px-3 text-sm"
+            >
+              <option value="">Default</option>
+              <option
+                v-for="ef in displaySettings.effects.value"
+                :key="ef.id"
+                :value="ef.id"
+              >
+                {{ ef.name }}
+              </option>
+            </select>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="override_delay">Delay (ms, 0 = default)</Label>
+            <Input
+              id="override_delay"
+              type="number"
+              :min="0"
+              :max="500"
+              v-model.number="overrideDelay"
+              class="w-32"
+            />
+          </div>
+        </div>
+      </div>
+    </details>
 
     <!-- Mode toggle -->
     <div class="flex items-center gap-2">

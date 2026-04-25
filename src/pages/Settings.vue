@@ -43,12 +43,17 @@ import type { components } from '@/api.d'
 import { useTime } from '@/composables/useTime'
 import { useModules } from '@/composables/useModules'
 import { useSchedules } from '@/composables/useSchedules'
+import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
+
+const { toast } = useToast()
 
 type Settings = components['schemas']['Settings']
 type QuietWindow = components['schemas']['QuietWindow']
 type QuietHours = components['schemas']['QuietHours']
 type AboutInfo = components['schemas']['AboutInfo']
 type SystemInfo = components['schemas']['SystemInfo']
+type PresetMeta = components['schemas']['PresetMeta']
 
 const DAY_LABELS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'] as const
 const DAY_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
@@ -57,21 +62,87 @@ const DAY_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
 const settings = ref<Settings | null>(null)
 const about = ref<AboutInfo | null>(null)
 const systemInfo = ref<SystemInfo | null>(null)
+const presets = ref<PresetMeta[]>([])
 const deviceName = ref('')
 const deviceNameSaving = ref(false)
 
 async function loadDevice() {
-  const [s, a, sys] = await Promise.all([
+  const [s, a, sys, p] = await Promise.all([
     apiClient.GET('/api/settings'),
     apiClient.GET('/api/about'),
     apiClient.GET('/api/system'),
+    apiClient.GET('/api/presets'),
   ])
   if (s.data) {
     settings.value = s.data
     deviceName.value = s.data.device_name
+    bootPresetId.value = s.data.boot_preset_id
+    speedDraft.value = s.data.default_speed
+    accelDraft.value = s.data.default_accel
   }
   if (a.data) about.value = a.data
   if (sys.data) systemInfo.value = sys.data
+  if (p.data) presets.value = p.data.presets
+}
+
+// ---------- Boot preset ----------
+const bootPresetId = ref<number>(0)
+const bootPresetSaving = ref(false)
+const bootPresetDirty = computed(
+  () => !!settings.value && bootPresetId.value !== settings.value.boot_preset_id
+)
+async function saveBootPreset() {
+  if (!bootPresetDirty.value) return
+  bootPresetSaving.value = true
+  try {
+    const { data } = await apiClient.POST('/api/settings', {
+      body: { boot_preset_id: bootPresetId.value },
+    })
+    if (data) settings.value = data
+    toast({ title: 'Boot preset saved', variant: 'success' })
+  } catch (e) {
+    toast({
+      title: "Couldn't save",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    bootPresetSaving.value = false
+  }
+}
+
+// ---------- Motor defaults ----------
+const speedDraft = ref<number>(0)
+const accelDraft = ref<number>(0)
+const motorSaving = ref(false)
+const motorDirty = computed(() => {
+  if (!settings.value) return false
+  return (
+    speedDraft.value !== settings.value.default_speed ||
+    accelDraft.value !== settings.value.default_accel
+  )
+})
+async function saveMotor() {
+  if (!motorDirty.value) return
+  motorSaving.value = true
+  try {
+    const { data } = await apiClient.POST('/api/settings', {
+      body: {
+        default_speed: speedDraft.value,
+        default_accel: accelDraft.value,
+      },
+    })
+    if (data) settings.value = data
+    toast({ title: 'Motor defaults saved', variant: 'success' })
+  } catch (e) {
+    toast({
+      title: "Couldn't save",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    motorSaving.value = false
+  }
 }
 
 const signal = computed(() => {
@@ -257,6 +328,86 @@ onMounted(() => {
             </dd>
           </div>
         </dl>
+      </CardContent>
+    </Card>
+
+    <!-- Boot preset -->
+    <Card>
+      <CardHeader>
+        <CardTitle>Boot preset</CardTitle>
+        <CardDescription>
+          Shown automatically a moment after the display powers on.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div class="flex flex-col gap-1.5 sm:flex-row sm:items-end sm:gap-2">
+          <div class="flex-1">
+            <Label for="boot_preset">Preset</Label>
+            <select
+              id="boot_preset"
+              v-model.number="bootPresetId"
+              :disabled="!settings"
+              class="h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+            >
+              <option :value="0">None</option>
+              <option v-for="p in presets" :key="p.id" :value="p.id">
+                {{ p.name }}
+              </option>
+            </select>
+          </div>
+          <Button
+            :disabled="!bootPresetDirty || bootPresetSaving"
+            @click="saveBootPreset"
+          >
+            <Loader2 v-if="bootPresetSaving" class="animate-spin" />
+            <Save v-else />
+            Save
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- Motor defaults -->
+    <Card>
+      <CardHeader>
+        <CardTitle>Motor defaults</CardTitle>
+        <CardDescription>
+          Pushed to every module on boot. 0 leaves the firmware default in
+          place.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <div class="flex flex-col gap-1.5">
+          <Label for="default_speed">Speed (steps/s)</Label>
+          <Input
+            id="default_speed"
+            type="number"
+            :min="0"
+            :max="65535"
+            v-model.number="speedDraft"
+            class="w-32"
+          />
+        </div>
+        <div class="flex flex-col gap-1.5">
+          <Label for="default_accel">Acceleration (steps/s²)</Label>
+          <Input
+            id="default_accel"
+            type="number"
+            :min="0"
+            :max="65535"
+            v-model.number="accelDraft"
+            class="w-32"
+          />
+        </div>
+        <Button
+          class="sm:ml-auto"
+          :disabled="!motorDirty || motorSaving"
+          @click="saveMotor"
+        >
+          <Loader2 v-if="motorSaving" class="animate-spin" />
+          <Save v-else />
+          Save
+        </Button>
       </CardContent>
     </Card>
 

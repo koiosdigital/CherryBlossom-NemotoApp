@@ -27,8 +27,11 @@ import {
   ChevronLeft,
   Eye,
   FileUp,
+  Home,
   Loader2,
+  MoreHorizontal,
   Octagon,
+  OctagonAlert,
   Pencil,
   Radar,
   RefreshCw,
@@ -45,6 +48,7 @@ import { useFlaps } from '@/composables/useFlaps'
 import { useBootloader } from '@/composables/useBootloader'
 import { useToast } from '@/composables/useToast'
 import CalibrationModal from './CalibrationModal.vue'
+import ModuleAdvancedModal from '@/components/ModuleAdvancedModal.vue'
 import { friendlyError } from '@/lib/errors'
 import type { components } from '@/api.d'
 
@@ -284,6 +288,52 @@ function openCalibration(uuid: string) {
   calibrationOpen.value = true
 }
 
+// ---------- advanced module modal ----------
+const advancedUuid = ref<string | null>(null)
+const advancedOpen = ref(false)
+function openAdvanced(uuid: string) {
+  advancedUuid.value = uuid
+  advancedOpen.value = true
+}
+
+// ---------- bus-wide recovery actions ----------
+const homingAll = ref(false)
+const stoppingAll = ref(false)
+
+const recoveryConfirmOpen = ref(false)
+const pendingRecovery = ref<'home_all' | 'emergency_stop' | null>(null)
+
+function askRecovery(kind: 'home_all' | 'emergency_stop') {
+  pendingRecovery.value = kind
+  recoveryConfirmOpen.value = true
+}
+
+async function runRecovery() {
+  const kind = pendingRecovery.value
+  if (!kind) return
+  recoveryConfirmOpen.value = false
+  if (kind === 'home_all') homingAll.value = true
+  else stoppingAll.value = true
+  try {
+    await apiClient.POST('/api/modules', { body: { action: kind } })
+    toast({
+      title:
+        kind === 'home_all' ? 'Homing every module' : 'Emergency stop sent',
+      variant: kind === 'home_all' ? 'success' : 'warn',
+    })
+  } catch (e) {
+    toast({
+      title: kind === 'home_all' ? "Couldn't home modules" : "Couldn't stop",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    homingAll.value = false
+    stoppingAll.value = false
+    pendingRecovery.value = null
+  }
+}
+
 // ---------- bootloader / firmware ----------
 const STATE_LABEL: Record<BootloaderState, string> = {
   idle: 'Idle',
@@ -452,10 +502,33 @@ function uuidParts(u: string) {
             Lay out the wall, calibrate each module, and update firmware.
           </p>
         </div>
-        <Button variant="ghost" size="sm" @click="refreshAll">
-          <RefreshCw />
-          Refresh
-        </Button>
+        <div class="flex flex-wrap items-center gap-1">
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="homingAll"
+            @click="askRecovery('home_all')"
+          >
+            <Loader2 v-if="homingAll" class="animate-spin" />
+            <Home v-else />
+            Home all
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="stoppingAll"
+            class="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            @click="askRecovery('emergency_stop')"
+          >
+            <Loader2 v-if="stoppingAll" class="animate-spin" />
+            <OctagonAlert v-else />
+            Stop
+          </Button>
+          <Button variant="ghost" size="sm" @click="refreshAll">
+            <RefreshCw />
+            Refresh
+          </Button>
+        </div>
       </div>
     </section>
 
@@ -779,6 +852,15 @@ function uuidParts(u: string) {
                       Calibrate
                     </Button>
                     <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Advanced"
+                      title="Advanced"
+                      @click="openAdvanced(m.uuid)"
+                    >
+                      <MoreHorizontal />
+                    </Button>
+                    <Button
                       v-if="m.grid"
                       variant="ghost"
                       size="icon"
@@ -1098,5 +1180,46 @@ function uuidParts(u: string) {
       v-model:open="calibrationOpen"
       :uuid="calibrationUuid"
     />
+
+    <ModuleAdvancedModal
+      v-model:open="advancedOpen"
+      :uuid="advancedUuid"
+    />
+
+    <!-- Recovery confirm -->
+    <Dialog v-model:open="recoveryConfirmOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {{
+              pendingRecovery === 'home_all'
+                ? 'Home every module?'
+                : 'Emergency stop every module?'
+            }}
+          </DialogTitle>
+          <DialogDescription>
+            <template v-if="pendingRecovery === 'home_all'">
+              Sends a home command to every connected module. Useful if
+              modules look stuck or out of sync.
+            </template>
+            <template v-else>
+              Halts all motion immediately. The display will be wrong until
+              you push another frame or home everything.
+            </template>
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <DialogClose as-child>
+            <Button variant="ghost">Cancel</Button>
+          </DialogClose>
+          <Button
+            :variant="pendingRecovery === 'emergency_stop' ? 'destructive' : 'default'"
+            @click="runRecovery"
+          >
+            {{ pendingRecovery === 'home_all' ? 'Home all' : 'Stop all' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

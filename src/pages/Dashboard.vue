@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   Card,
   CardContent,
+  CardHeader,
+  CardTitle,
   Button,
   Badge,
+  Label,
+  Slider,
+  Switch,
   Dialog,
   DialogContent,
   DialogHeader,
@@ -14,11 +19,19 @@ import {
   DialogFooter,
   DialogClose,
 } from '@/components/ui'
-import { Loader2, Pencil, Play, Zap } from 'lucide-vue-next'
+import {
+  Eraser,
+  Loader2,
+  Pencil,
+  Play,
+  Sparkles,
+  Zap,
+} from 'lucide-vue-next'
 import DisplayCell from '@/components/DisplayCell.vue'
 import { apiClient } from '@/api'
 import type { components } from '@/api.d'
 import { useDisplay } from '@/composables/useDisplay'
+import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { useGrid } from '@/composables/useGrid'
 import { useFlaps } from '@/composables/useFlaps'
 import { useModules } from '@/composables/useModules'
@@ -28,10 +41,70 @@ import { friendlyError } from '@/lib/errors'
 type PresetMeta = components['schemas']['PresetMeta']
 
 const display = useDisplay()
+const displaySettings = useDisplaySettings()
 const gridState = useGrid()
 const flaps = useFlaps()
 const modules = useModules()
 const { toast } = useToast()
+
+// ---------- display settings (effect, delay, cycle_type) ----------
+const effectId = computed({
+  get: () => displaySettings.settings.value?.effect ?? '',
+  set: (v: string) => {
+    displaySettings.update({ effect: v }).catch((e) =>
+      toast({ title: "Couldn't change effect", description: friendlyError(e), variant: 'destructive' })
+    )
+  },
+})
+// Local-then-debounced commit for delay so dragging the slider doesn't fire
+// dozens of POSTs in a second.
+const delayLocal = ref<number>(displaySettings.settings.value?.delay ?? 0)
+let delayCommitTimer: ReturnType<typeof setTimeout> | null = null
+let lastDelayUserAt = 0
+watch(
+  () => displaySettings.settings.value?.delay,
+  (v) => {
+    // Don't fight the user mid-drag: ignore server echoes within 500ms of
+    // the last local change.
+    if (v != null && Date.now() - lastDelayUserAt > 500) delayLocal.value = v
+  }
+)
+function setDelay(arr: number[]) {
+  const v = arr[0] ?? 0
+  delayLocal.value = v
+  lastDelayUserAt = Date.now()
+  if (delayCommitTimer) clearTimeout(delayCommitTimer)
+  delayCommitTimer = setTimeout(() => {
+    displaySettings.update({ delay: v }).catch((e) =>
+      toast({ title: "Couldn't change delay", description: friendlyError(e), variant: 'destructive' })
+    )
+  }, 250)
+}
+const fullCycle = computed({
+  get: () => displaySettings.settings.value?.cycle_type === 'full',
+  set: (v: boolean) => {
+    displaySettings.update({ cycle_type: v ? 'full' : 'partial' }).catch((e) =>
+      toast({ title: "Couldn't change cycle", description: friendlyError(e), variant: 'destructive' })
+    )
+  },
+})
+
+// ---------- clear display ----------
+const clearing = ref(false)
+async function clearDisplay() {
+  clearing.value = true
+  try {
+    await apiClient.POST('/api/display/clear', {})
+  } catch (e) {
+    toast({
+      title: "Couldn't clear",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    clearing.value = false
+  }
+}
 
 // ---------- live preview ----------
 const gridSize = computed(
@@ -159,13 +232,73 @@ const activity = [
         </p>
       </div>
 
-      <div class="flex justify-center">
+      <div class="flex flex-wrap items-center justify-center gap-2">
         <Button variant="ghost" size="sm" @click="openPicker">
           <Play />
           Run preset
         </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          :disabled="clearing"
+          @click="clearDisplay"
+        >
+          <Loader2 v-if="clearing" class="animate-spin" />
+          <Eraser v-else />
+          Clear
+        </Button>
       </div>
     </section>
+
+    <!-- Display effect controls -->
+    <Card v-if="displaySettings.settings.value">
+      <CardHeader>
+        <CardTitle class="flex items-center gap-2 text-base">
+          <Sparkles class="size-4 text-primary" />
+          Display effect
+        </CardTitle>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-4 sm:flex-row sm:items-end">
+        <div class="flex flex-1 flex-col gap-1.5">
+          <Label for="effect">Stagger</Label>
+          <select
+            id="effect"
+            v-model="effectId"
+            class="h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+          >
+            <option
+              v-for="ef in displaySettings.effects.value"
+              :key="ef.id"
+              :value="ef.id"
+            >
+              {{ ef.name }}
+            </option>
+          </select>
+        </div>
+        <div class="flex flex-1 flex-col gap-1.5">
+          <div class="flex items-baseline justify-between">
+            <Label for="delay">Step delay</Label>
+            <span class="num text-xs text-muted-foreground">
+              {{ delayLocal }} ms
+            </span>
+          </div>
+          <Slider
+            id="delay"
+            :model-value="[delayLocal]"
+            :min="0"
+            :max="500"
+            :step="5"
+            @update:model-value="setDelay"
+          />
+        </div>
+        <div class="flex items-center gap-2">
+          <Switch id="full_cycle" v-model="fullCycle" />
+          <Label for="full_cycle" class="cursor-pointer">
+            Full rotation
+          </Label>
+        </div>
+      </CardContent>
+    </Card>
 
     <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <Card>
