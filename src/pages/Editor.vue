@@ -28,6 +28,7 @@ import { useGrid } from '@/composables/useGrid'
 import { useFlaps } from '@/composables/useFlaps'
 import { useDisplay } from '@/composables/useDisplay'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 
 const route = useRoute()
 const router = useRouter()
@@ -72,6 +73,12 @@ const title = computed(() => {
   if (kind.value === 'display') return 'Editing live display'
   if (kind.value === 'new-preset') return 'New preset'
   return presetName.value ? `Editing ${presetName.value}` : 'Editing preset'
+})
+
+const saveLabel = computed(() => {
+  if (kind.value === 'display') return 'Push to display'
+  if (kind.value === 'new-preset') return 'Save preset'
+  return 'Save changes'
 })
 
 // ---------- load ----------
@@ -305,7 +312,7 @@ async function save() {
   } catch (e) {
     toast({
       title: "Couldn't save",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -367,7 +374,7 @@ onBeforeUnmount(() => {
       <Button :disabled="!dirty || saving || !ready" @click="save">
         <Loader2 v-if="saving" class="animate-spin" />
         <Save v-else />
-        Save
+        {{ saveLabel }}
       </Button>
     </div>
 

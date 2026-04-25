@@ -23,6 +23,7 @@ import { useGrid } from '@/composables/useGrid'
 import { useFlaps } from '@/composables/useFlaps'
 import { useModules } from '@/composables/useModules'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 
 type PresetMeta = components['schemas']['PresetMeta']
 
@@ -85,7 +86,7 @@ async function runPreset(p: PresetMeta) {
   } catch (e) {
     toast({
       title: "Couldn't run preset",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {

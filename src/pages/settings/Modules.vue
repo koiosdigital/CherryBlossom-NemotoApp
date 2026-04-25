@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   Card,
@@ -10,6 +10,7 @@ import {
   CardFooter,
   Button,
   Badge,
+  Input,
   Label,
   Switch,
   Dialog,
@@ -24,40 +25,266 @@ import {
   AlertTriangle,
   Check,
   ChevronLeft,
+  Eye,
   FileUp,
   Loader2,
   Octagon,
+  Pencil,
   Radar,
   RefreshCw,
   Rocket,
+  Trash2,
+  Undo2,
   Upload,
   Zap,
 } from 'lucide-vue-next'
+import { apiClient } from '@/api'
 import { useModules } from '@/composables/useModules'
+import { useGrid } from '@/composables/useGrid'
+import { useFlaps } from '@/composables/useFlaps'
 import { useBootloader } from '@/composables/useBootloader'
 import { useToast } from '@/composables/useToast'
+import CalibrationModal from './CalibrationModal.vue'
+import { friendlyError } from '@/lib/errors'
 import type { components } from '@/api.d'
 
 type BootloaderState = components['schemas']['BootloaderState']
 type BootloaderFailReason = components['schemas']['BootloaderFailReason']
+type StepperState = components['schemas']['StepperState']
 
 const modules = useModules()
+const gridState = useGrid()
+const flapsState = useFlaps()
 const bootloader = useBootloader()
 const { toast } = useToast()
 
 onMounted(() => {
-  // Populate `info.fw` for every module so the list shows current versions.
-  // Each fetch is a CAN round-trip; they run in parallel and the list updates
-  // incrementally as results land.
+  // Populate `info.fw` and persisted/calibration state for every module.
   modules.fetchAll().catch(() => {})
 })
 
-// ---------- module list ----------
+// ---------- visual constants ----------
+const CELL_W = 50
+const CELL_H = 80
+const AXIS = 24
+
+// ---------- grid + modules ----------
+const gridSize = computed(
+  () => gridState.grid.value?.grid ?? { width: 0, height: 0 }
+)
+
+const cellIndex = computed(() => {
+  const m = new Map<string, string>()
+  for (const entry of gridState.grid.value?.mapping ?? []) {
+    m.set(`${entry.x},${entry.y}`, entry.uuid)
+  }
+  return m
+})
+
+function moduleAt(x: number, y: number) {
+  const uuid = cellIndex.value.get(`${x},${y}`)
+  return uuid ? modules.modules.value.find((m) => m.uuid === uuid) : null
+}
+
+const unmapped = computed(() =>
+  modules.modules.value.filter((m) => !m.grid)
+)
+
 const sortedModules = computed(() =>
   [...modules.modules.value].sort((a, b) => a.short_id - b.short_id)
 )
 
-// ---------- friendly labels ----------
+// ---------- motion indicator ----------
+type Motion = { label: string; spinning: boolean; tone: 'destructive' | 'secondary' }
+function motionFor(state: StepperState | undefined | null): Motion | null {
+  if (!state || state === 'idle' || state === 'unknown') return null
+  if (state === 'error')
+    return { label: 'Error', spinning: false, tone: 'destructive' }
+  if (state === 'homing' || state === 'rehoming')
+    return { label: 'Homing', spinning: true, tone: 'secondary' }
+  return { label: 'Moving', spinning: true, tone: 'secondary' }
+}
+
+// ---------- dimensions popover ----------
+const resizeOpen = ref(false)
+const widthDraft = ref(0)
+const heightDraft = ref(0)
+const resizing = ref(false)
+watch(
+  () => gridSize.value,
+  (g) => {
+    widthDraft.value = g.width
+    heightDraft.value = g.height
+  },
+  { immediate: true }
+)
+const dimsDirty = computed(
+  () =>
+    widthDraft.value !== gridSize.value.width ||
+    heightDraft.value !== gridSize.value.height
+)
+async function applyDims() {
+  if (!dimsDirty.value) return
+  resizing.value = true
+  try {
+    await gridState.setSize(widthDraft.value, heightDraft.value)
+    resizeOpen.value = false
+    toast({ title: 'Board resized', variant: 'success' })
+  } catch (e) {
+    toast({
+      title: "Couldn't resize",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    resizing.value = false
+  }
+}
+
+// ---------- reset board ----------
+const resetOpen = ref(false)
+const resetting = ref(false)
+async function resetBoard() {
+  resetting.value = true
+  try {
+    await gridState.resetBoard()
+    resetOpen.value = false
+    toast({ title: 'Board cleared', variant: 'success' })
+  } catch (e) {
+    toast({
+      title: "Couldn't reset",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    resetting.value = false
+  }
+}
+
+// ---------- identify wave ----------
+const wave = ref(new Map<string, number>())
+const waveRunning = ref(false)
+const letterFlaps = computed(() => flapsState.letters.value)
+
+function glyphForUuid(uuid: string): string | null {
+  const idx = wave.value.get(uuid)
+  if (idx == null) return null
+  return flapsState.byId.value.get(idx)?.glyph ?? null
+}
+
+async function runIdentify() {
+  if (!unmapped.value.length) return
+  if (!letterFlaps.value.length) {
+    toast({
+      title: 'Flap catalog unavailable',
+      description: 'Try refreshing the page.',
+      variant: 'warn',
+    })
+    return
+  }
+  waveRunning.value = true
+  try {
+    const batchSize = Math.min(unmapped.value.length, letterFlaps.value.length)
+    const batch = unmapped.value.slice(0, batchSize)
+    const flapIds = letterFlaps.value.slice(0, batchSize).map((f) => f.id)
+    const { data, error: err } = await apiClient.POST(
+      '/api/setup/identify_pass',
+      { body: { flaps: flapIds, modules: batch.map((m) => m.uuid) } }
+    )
+    if (err || !data) throw err ?? new Error('identify failed')
+    const next = new Map<string, number>()
+    for (const entry of data.pass) next.set(entry.uuid, entry.flap)
+    wave.value = next
+    toast({
+      title: `Identifying ${data.pass.length} module${data.pass.length === 1 ? '' : 's'}`,
+      description: 'Each module shows a different letter on the wall.',
+      variant: 'success',
+    })
+  } catch (e) {
+    toast({
+      title: "Couldn't run identify",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    waveRunning.value = false
+  }
+}
+
+function clearWave() {
+  wave.value = new Map()
+}
+
+// ---------- cell picker (assign empty cell → module) ----------
+const pickerOpen = ref(false)
+const pickerCell = ref<{ x: number; y: number } | null>(null)
+const assigning = ref(false)
+
+function openPicker(x: number, y: number) {
+  pickerCell.value = { x, y }
+  pickerOpen.value = true
+}
+
+const pickerCandidates = computed(() => {
+  type C = { uuid: string; shortId: number; letter: string | null; sortKey: string; alive: boolean }
+  const out: C[] = []
+  for (const m of unmapped.value) {
+    const letter = glyphForUuid(m.uuid)
+    out.push({
+      uuid: m.uuid,
+      shortId: m.short_id,
+      letter,
+      sortKey: letter ?? `~${m.uuid}`,
+      alive: m.alive,
+    })
+  }
+  out.sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+  return out
+})
+
+async function assign(uuid: string) {
+  if (!pickerCell.value) return
+  assigning.value = true
+  try {
+    const { x, y } = pickerCell.value
+    await gridState.assignCell(x, y, uuid)
+    const next = new Map(wave.value)
+    next.delete(uuid)
+    wave.value = next
+    pickerOpen.value = false
+    pickerCell.value = null
+  } catch (e) {
+    toast({
+      title: "Couldn't place module",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    assigning.value = false
+  }
+}
+
+async function removeAt(x: number, y: number) {
+  try {
+    await gridState.removeCell(x, y)
+  } catch (e) {
+    toast({
+      title: "Couldn't remove",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  }
+}
+
+// ---------- calibration modal ----------
+const calibrationUuid = ref<string | null>(null)
+const calibrationOpen = ref(false)
+function openCalibration(uuid: string) {
+  calibrationUuid.value = uuid
+  calibrationOpen.value = true
+}
+
+// ---------- bootloader / firmware ----------
 const STATE_LABEL: Record<BootloaderState, string> = {
   idle: 'Idle',
   arming: 'Waking up modules',
@@ -70,7 +297,10 @@ const STATE_LABEL: Record<BootloaderState, string> = {
   aborted: 'Cancelled',
 }
 
-const STATE_VARIANT: Record<BootloaderState, 'default' | 'success' | 'warn' | 'destructive' | 'outline' | 'secondary'> = {
+const STATE_VARIANT: Record<
+  BootloaderState,
+  'default' | 'success' | 'warn' | 'destructive' | 'outline' | 'secondary'
+> = {
   idle: 'outline',
   arming: 'secondary',
   connecting: 'secondary',
@@ -95,29 +325,21 @@ const FAIL_LABEL: Record<BootloaderFailReason, string> = {
 }
 
 const progressPct = computed(() => Math.round(bootloader.progress.value * 100))
-
 const showSessionCard = computed(() => bootloader.isActive.value)
 
-// ---------- file picker ----------
 const fileInput = ref<HTMLInputElement | null>(null)
 const file = ref<File | null>(null)
 const assumeInBl = ref(false)
-
-function pickFile() {
-  fileInput.value?.click()
-}
-
+function pickFile() { fileInput.value?.click() }
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   file.value = input.files?.[0] ?? null
 }
-
 function clearFile() {
   file.value = null
   if (fileInput.value) fileInput.value.value = ''
 }
 
-// ---------- actions ----------
 const uploading = ref(false)
 const probing = ref(false)
 const entering = ref(false)
@@ -129,25 +351,16 @@ async function startFlash() {
   confirmFlashOpen.value = false
   uploading.value = true
   try {
-    const res = await bootloader.upload(file.value, {
-      assumeInBl: assumeInBl.value,
-    })
+    const res = await bootloader.upload(file.value, { assumeInBl: assumeInBl.value })
     if (!res.ok) {
-      toast({
-        title: 'File rejected',
-        description: res.error,
-        variant: 'destructive',
-      })
+      toast({ title: 'File rejected', description: res.error, variant: 'destructive' })
       return
     }
-    toast({
-      title: `Updating to ${res.fw}`,
-      variant: 'success',
-    })
+    toast({ title: `Updating to ${res.fw}`, variant: 'success' })
   } catch (e) {
     toast({
       title: "Couldn't start update",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -161,17 +374,11 @@ async function runProbe() {
     const r = await bootloader.probe()
     if (!r) return
     toast({
-      title: r.any_in_bootloader
-        ? 'A module is ready to update'
-        : 'No modules ready to update',
+      title: r.any_in_bootloader ? 'A module is ready to update' : 'No modules ready to update',
       variant: r.any_in_bootloader ? 'success' : 'warn',
     })
   } catch (e) {
-    toast({
-      title: "Couldn't check",
-      description: e instanceof Error ? e.message : String(e),
-      variant: 'destructive',
-    })
+    toast({ title: "Couldn't check", description: friendlyError(e), variant: 'destructive' })
   } finally {
     probing.value = false
   }
@@ -182,17 +389,11 @@ async function runEnter() {
   try {
     const r = await bootloader.enterBootloader()
     toast({
-      title: r?.ok
-        ? 'Modules switching to update mode'
-        : "Couldn't switch modes",
+      title: r?.ok ? 'Modules switching to update mode' : "Couldn't switch modes",
       variant: r?.ok ? 'success' : 'destructive',
     })
   } catch (e) {
-    toast({
-      title: "Couldn't switch modes",
-      description: e instanceof Error ? e.message : String(e),
-      variant: 'destructive',
-    })
+    toast({ title: "Couldn't switch modes", description: friendlyError(e), variant: 'destructive' })
   } finally {
     entering.value = false
   }
@@ -202,27 +403,20 @@ async function runAbort() {
   aborting.value = true
   try {
     const r = await bootloader.abort()
-    toast({
-      title: r?.ok ? 'Cancelling update' : 'Nothing to cancel',
-      variant: r?.ok ? 'warn' : 'default',
-    })
+    toast({ title: r?.ok ? 'Cancelling update' : 'Nothing to cancel', variant: r?.ok ? 'warn' : 'default' })
   } catch (e) {
-    toast({
-      title: "Couldn't cancel",
-      description: e instanceof Error ? e.message : String(e),
-      variant: 'destructive',
-    })
+    toast({ title: "Couldn't cancel", description: friendlyError(e), variant: 'destructive' })
   } finally {
     aborting.value = false
   }
 }
 
 function refreshAll() {
+  gridState.refresh()
   bootloader.refresh()
   modules.fetchAll().catch(() => {})
 }
 
-// ---------- per-module session overlay ----------
 function deviceEntry(uuid: string) {
   return bootloader.devicesByUuid.value.get(uuid) ?? null
 }
@@ -231,6 +425,10 @@ function fmtSize(bytes: number) {
   if (!bytes) return '—'
   if (bytes < 1024) return `${bytes} B`
   return `${(bytes / 1024).toFixed(1)} KB`
+}
+
+function uuidParts(u: string) {
+  return [u.slice(0, 4), u.slice(4, 8), u.slice(8, 12)]
 }
 </script>
 
@@ -251,7 +449,7 @@ function fmtSize(bytes: number) {
             Modules
           </h1>
           <p class="max-w-xl text-sm text-muted-foreground">
-            Every module on the display and their firmware versions.
+            Lay out the wall, calibrate each module, and update firmware.
           </p>
         </div>
         <Button variant="ghost" size="sm" @click="refreshAll">
@@ -260,6 +458,350 @@ function fmtSize(bytes: number) {
         </Button>
       </div>
     </section>
+
+    <!-- Wall layout -->
+    <Card>
+      <CardHeader>
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="flex flex-col gap-1">
+            <CardTitle>
+              {{ gridSize.width }} × {{ gridSize.height }} board
+            </CardTitle>
+            <CardDescription>
+              Tap an empty cell to place a module. Tap a placed module to
+              calibrate it.
+            </CardDescription>
+          </div>
+          <div class="flex items-center gap-1">
+            <Dialog v-model:open="resizeOpen">
+              <Button variant="outline" size="sm" @click="resizeOpen = true">
+                <Pencil />
+                Resize
+              </Button>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Resize the board</DialogTitle>
+                  <DialogDescription>
+                    Cells outside the new size will be removed.
+                  </DialogDescription>
+                </DialogHeader>
+                <div class="flex items-end gap-3">
+                  <div class="flex flex-col gap-1.5">
+                    <Label for="cols">Columns</Label>
+                    <Input
+                      id="cols"
+                      type="number"
+                      :min="1"
+                      :max="32"
+                      v-model.number="widthDraft"
+                      class="w-24"
+                    />
+                  </div>
+                  <span class="mb-2 text-muted-foreground">×</span>
+                  <div class="flex flex-col gap-1.5">
+                    <Label for="rows">Rows</Label>
+                    <Input
+                      id="rows"
+                      type="number"
+                      :min="1"
+                      :max="16"
+                      v-model.number="heightDraft"
+                      class="w-24"
+                    />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <DialogClose as-child>
+                    <Button variant="ghost">Cancel</Button>
+                  </DialogClose>
+                  <Button :disabled="!dimsDirty || resizing" @click="applyDims">
+                    <Loader2 v-if="resizing" class="animate-spin" />
+                    Apply
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <Dialog v-model:open="resetOpen">
+              <Button variant="ghost" size="sm" @click="resetOpen = true">
+                <Undo2 />
+                Reset
+              </Button>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Clear all placements?</DialogTitle>
+                  <DialogDescription>
+                    Removes every module from the board. The modules
+                    themselves stay connected.
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogFooter>
+                  <DialogClose as-child>
+                    <Button variant="ghost">Cancel</Button>
+                  </DialogClose>
+                  <Button
+                    variant="destructive"
+                    :disabled="resetting"
+                    @click="resetBoard"
+                  >
+                    <Loader2 v-if="resetting" class="animate-spin" />
+                    <Trash2 v-else />
+                    Clear
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div
+          v-if="gridSize.width && gridSize.height"
+          class="-mx-6 overflow-x-auto px-6 sm:mx-0 sm:px-0"
+        >
+          <div
+            class="mx-auto grid w-max gap-1"
+            :style="{
+              gridTemplateColumns: `${AXIS}px repeat(${gridSize.width}, ${CELL_W}px)`,
+              gridTemplateRows: `${AXIS}px repeat(${gridSize.height}, ${CELL_H}px)`,
+            }"
+          >
+            <div />
+            <div
+              v-for="x in gridSize.width"
+              :key="`col-${x}`"
+              class="num flex items-end justify-center pb-1 text-[10px] text-muted-foreground"
+            >
+              {{ x - 1 }}
+            </div>
+            <template v-for="y in gridSize.height" :key="`row-${y}`">
+              <div
+                class="num flex items-center justify-end pr-2 text-[10px] text-muted-foreground"
+              >
+                {{ y - 1 }}
+              </div>
+              <template v-for="x in gridSize.width" :key="`${x}-${y}`">
+                <button
+                  v-if="moduleAt(x - 1, y - 1)"
+                  type="button"
+                  :title="`(${x - 1}, ${y - 1}) · ${moduleAt(x - 1, y - 1)!.uuid}`"
+                  class="relative flex flex-col items-center justify-between gap-1 rounded-sm border border-border bg-muted/40 p-1.5 transition-colors hover:border-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="
+                    moduleAt(x - 1, y - 1)?.info &&
+                    !moduleAt(x - 1, y - 1)?.info?.calibrated
+                      ? 'border-amber-500/60'
+                      : ''
+                  "
+                  @click="openCalibration(moduleAt(x - 1, y - 1)!.uuid)"
+                >
+                  <span
+                    class="status-dot size-1.5!"
+                    :class="
+                      moduleAt(x - 1, y - 1)?.alive
+                        ? 'text-emerald-500'
+                        : 'text-amber-500'
+                    "
+                  />
+                  <span
+                    class="flex flex-col items-center font-mono text-[10px] leading-tight tracking-tight"
+                  >
+                    <span
+                      v-for="part in uuidParts(moduleAt(x - 1, y - 1)!.uuid)"
+                      :key="part"
+                    >
+                      {{ part }}
+                    </span>
+                  </span>
+                  <Loader2
+                    v-if="motionFor(moduleAt(x - 1, y - 1)?.status?.state)?.spinning"
+                    class="absolute right-0.5 top-0.5 size-2.5 animate-spin text-primary"
+                  />
+                  <Check
+                    v-else-if="moduleAt(x - 1, y - 1)?.info?.calibrated"
+                    class="absolute right-0.5 top-0.5 size-2.5 text-emerald-500"
+                  />
+                  <AlertTriangle
+                    v-else-if="
+                      moduleAt(x - 1, y - 1)?.info &&
+                      !moduleAt(x - 1, y - 1)?.info?.calibrated
+                    "
+                    class="absolute right-0.5 top-0.5 size-2.5 text-amber-500"
+                  />
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  :title="`(${x - 1}, ${y - 1})`"
+                  class="rounded-sm border border-dashed border-border/50 text-xs text-muted-foreground/60 transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openPicker(x - 1, y - 1)"
+                >
+                  +
+                </button>
+              </template>
+            </template>
+          </div>
+        </div>
+        <p v-else class="text-sm text-muted-foreground">
+          Set a board size above to start placing modules.
+        </p>
+      </CardContent>
+      <CardFooter
+        v-if="gridSize.width && gridSize.height"
+        class="flex flex-wrap items-center justify-between gap-2"
+      >
+        <span class="text-xs text-muted-foreground">
+          {{ unmapped.length }} unplaced
+          module{{ unmapped.length === 1 ? '' : 's' }}
+        </span>
+        <div class="flex gap-2">
+          <Button
+            v-if="wave.size"
+            variant="ghost"
+            size="sm"
+            @click="clearWave"
+          >
+            Clear letters
+          </Button>
+          <Button
+            size="sm"
+            :disabled="!unmapped.length || waveRunning"
+            @click="runIdentify"
+          >
+            <Loader2 v-if="waveRunning" class="animate-spin" />
+            <Eye v-else />
+            Identify unplaced
+          </Button>
+        </div>
+      </CardFooter>
+    </Card>
+
+    <!-- Modules list -->
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          {{ sortedModules.length }} module{{ sortedModules.length === 1 ? '' : 's' }}
+        </CardTitle>
+      </CardHeader>
+      <CardContent class="px-0">
+        <div
+          v-if="sortedModules.length"
+          class="max-h-[28rem] overflow-y-auto"
+        >
+          <table class="w-full text-sm">
+            <thead
+              class="sticky top-0 z-10 border-b border-border bg-card text-xs text-muted-foreground"
+            >
+              <tr class="[&>th]:px-4 [&>th]:py-2 [&>th]:text-left">
+                <th class="w-10"></th>
+                <th class="num w-16">ID</th>
+                <th>Module</th>
+                <th>Position</th>
+                <th>Firmware</th>
+                <th>Status</th>
+                <th class="w-32 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="m in sortedModules"
+                :key="m.uuid"
+                class="border-b border-border last:border-b-0 hover:bg-muted/40 [&>td]:px-4 [&>td]:py-2.5"
+              >
+                <td>
+                  <span
+                    class="status-dot"
+                    :class="m.alive ? 'text-emerald-500' : 'text-amber-500'"
+                    :title="m.alive ? 'Online' : 'Offline'"
+                  />
+                </td>
+                <td class="num text-muted-foreground">{{ m.short_id }}</td>
+                <td>
+                  <span class="num text-xs">{{ m.uuid }}</span>
+                </td>
+                <td>
+                  <span v-if="m.grid" class="num text-xs text-muted-foreground">
+                    ({{ m.grid.x }}, {{ m.grid.y }})
+                  </span>
+                  <span v-else class="text-xs text-muted-foreground">Unplaced</span>
+                </td>
+                <td>
+                  <span v-if="m.info?.fw" class="num">{{ m.info.fw }}</span>
+                  <span v-else class="text-xs text-muted-foreground">—</span>
+                </td>
+                <td>
+                  <Badge
+                    v-if="motionFor(m.status?.state)"
+                    :variant="motionFor(m.status?.state)!.tone"
+                    class="gap-1"
+                  >
+                    <Loader2
+                      v-if="motionFor(m.status?.state)!.spinning"
+                      class="size-3 animate-spin"
+                    />
+                    <AlertTriangle
+                      v-else
+                      class="size-3"
+                    />
+                    {{ motionFor(m.status?.state)!.label }}
+                  </Badge>
+                  <Badge
+                    v-else-if="deviceEntry(m.uuid)?.came_back"
+                    variant="success"
+                    class="gap-1"
+                  >
+                    <Check class="size-3" />
+                    Updated
+                  </Badge>
+                  <Badge
+                    v-else-if="m.info?.calibrated"
+                    variant="success"
+                    class="gap-1"
+                  >
+                    <Check class="size-3" />
+                    Ready
+                  </Badge>
+                  <Badge
+                    v-else-if="m.info"
+                    variant="warn"
+                    class="gap-1"
+                  >
+                    <AlertTriangle class="size-3" />
+                    Calibrate
+                  </Badge>
+                  <span v-else class="text-xs text-muted-foreground">—</span>
+                </td>
+                <td>
+                  <div class="flex justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      @click="openCalibration(m.uuid)"
+                    >
+                      Calibrate
+                    </Button>
+                    <Button
+                      v-if="m.grid"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Remove from board"
+                      title="Remove from board"
+                      @click="removeAt(m.grid.x, m.grid.y)"
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div
+          v-else
+          class="px-6 py-10 text-center text-sm text-muted-foreground"
+        >
+          No modules connected.
+        </div>
+      </CardContent>
+    </Card>
 
     <!-- Active update card (only while running) -->
     <Card v-if="showSessionCard && bootloader.status.value">
@@ -330,7 +872,7 @@ function fmtSize(bytes: number) {
       </CardFooter>
     </Card>
 
-    <!-- Failure summary (only while terminal-failed and we're already done) -->
+    <!-- Failure summary -->
     <Card
       v-else-if="
         bootloader.status.value?.state === 'failed' &&
@@ -419,8 +961,8 @@ function fmtSize(bytes: number) {
                 </Label>
               </div>
               <p class="ml-10 text-xs text-muted-foreground">
-                Use this if a module is stuck without firmware. Otherwise leave
-                it off.
+                Use this if a module is stuck without firmware. Otherwise
+                leave it off.
               </p>
             </div>
             <div class="flex flex-wrap gap-2">
@@ -482,101 +1024,79 @@ function fmtSize(bytes: number) {
       </CardFooter>
     </Card>
 
-    <!-- Module inventory -->
-    <Card>
-      <CardHeader>
-        <CardTitle>
-          {{ sortedModules.length }} module{{ sortedModules.length === 1 ? '' : 's' }}
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="px-0">
+    <!-- Cell picker dialog -->
+    <Dialog v-model:open="pickerOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Place at
+            <span class="num text-muted-foreground" v-if="pickerCell">
+              ({{ pickerCell.x }}, {{ pickerCell.y }})
+            </span>
+          </DialogTitle>
+          <DialogDescription>
+            Pick the module that's at this position on the wall.
+          </DialogDescription>
+        </DialogHeader>
         <div
-          v-if="sortedModules.length"
-          class="max-h-[28rem] overflow-y-auto"
+          class="max-h-[55vh] overflow-y-auto rounded-md border border-border"
         >
-          <table class="w-full text-sm">
-            <thead
-              class="sticky top-0 z-10 border-b border-border bg-card text-xs text-muted-foreground"
-            >
-              <tr class="[&>th]:px-4 [&>th]:py-2 [&>th]:text-left">
-                <th class="w-10"></th>
-                <th class="num w-20">ID</th>
-                <th>Module</th>
-                <th>Position</th>
-                <th>Firmware</th>
-                <th>Last update</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="m in sortedModules"
-                :key="m.uuid"
-                class="border-b border-border last:border-b-0 hover:bg-muted/40 [&>td]:px-4 [&>td]:py-2.5"
-              >
-                <td>
-                  <span
-                    class="status-dot"
-                    :class="m.alive ? 'text-emerald-500' : 'text-amber-500'"
-                    :title="m.alive ? 'Online' : 'Offline'"
-                  />
-                </td>
-                <td class="num text-muted-foreground">{{ m.short_id }}</td>
-                <td>
-                  <span class="num text-xs">{{ m.uuid }}</span>
-                </td>
-                <td>
-                  <span v-if="m.grid" class="num text-xs text-muted-foreground">
-                    ({{ m.grid.x }}, {{ m.grid.y }})
-                  </span>
-                  <span v-else class="text-xs text-muted-foreground">—</span>
-                </td>
-                <td>
-                  <span v-if="m.info?.fw" class="num">{{ m.info.fw }}</span>
-                  <span v-else class="text-xs text-muted-foreground">unknown</span>
-                </td>
-                <td>
-                  <template v-if="deviceEntry(m.uuid)">
-                    <Badge
-                      v-if="deviceEntry(m.uuid)!.came_back"
-                      variant="success"
-                      class="gap-1"
-                    >
-                      <Check class="size-3" />
-                      <span class="num">{{ deviceEntry(m.uuid)!.new_fw ?? 'updated' }}</span>
-                    </Badge>
-                    <Badge
-                      v-else-if="bootloader.isActive.value"
-                      variant="secondary"
-                      class="gap-1"
-                    >
-                      <Loader2 class="size-3 animate-spin" />
-                      Updating
-                    </Badge>
-                    <Badge v-else variant="warn" class="gap-1">
-                      <AlertTriangle class="size-3" />
-                      Didn't come back
-                    </Badge>
-                  </template>
-                  <span v-else class="text-xs text-muted-foreground">—</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div
-          v-else
-          class="px-6 py-10 text-center text-sm text-muted-foreground"
-        >
-          No modules found. Try
-          <RouterLink
-            to="/settings/calibration"
-            class="text-primary hover:underline"
+          <button
+            v-for="c in pickerCandidates"
+            :key="c.uuid"
+            type="button"
+            class="flex w-full items-center gap-3 border-b border-border/60 px-3 py-2.5 text-left last:border-b-0 hover:bg-muted/60 disabled:opacity-50"
+            :disabled="assigning"
+            @click="assign(c.uuid)"
           >
-            running discovery
-          </RouterLink>
-          first.
+            <span
+              v-if="c.letter"
+              class="inline-flex size-10 shrink-0 items-center justify-center rounded-sm bg-primary font-mono text-base font-bold text-primary-foreground"
+            >
+              {{ c.letter }}
+            </span>
+            <span
+              v-else
+              class="inline-flex size-10 shrink-0 items-center justify-center rounded-sm border border-dashed border-border text-xs text-muted-foreground"
+            >
+              —
+            </span>
+            <div class="flex min-w-0 flex-col">
+              <span class="num truncate text-xs">{{ c.uuid }}</span>
+              <span class="text-[11px] text-muted-foreground">
+                ID {{ c.shortId }} · {{ c.alive ? 'Online' : 'Offline' }}
+              </span>
+            </div>
+          </button>
+          <div
+            v-if="!pickerCandidates.length"
+            class="px-3 py-8 text-center text-sm text-muted-foreground"
+          >
+            No unplaced modules.
+          </div>
         </div>
-      </CardContent>
-    </Card>
+        <DialogFooter class="justify-between sm:justify-between">
+          <Button
+            v-if="unmapped.length"
+            variant="outline"
+            size="sm"
+            :disabled="waveRunning"
+            @click="runIdentify"
+          >
+            <Loader2 v-if="waveRunning" class="animate-spin" />
+            <Eye v-else />
+            Identify
+          </Button>
+          <DialogClose as-child>
+            <Button variant="ghost">Cancel</Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <CalibrationModal
+      v-model:open="calibrationOpen"
+      :uuid="calibrationUuid"
+    />
   </div>
 </template>

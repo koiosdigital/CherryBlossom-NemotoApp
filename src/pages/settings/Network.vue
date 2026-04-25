@@ -14,7 +14,9 @@ import {
   Label,
 } from '@/components/ui'
 import {
+  Check,
   ChevronLeft,
+  Copy,
   Loader2,
   RefreshCw,
   Save,
@@ -26,6 +28,7 @@ import { apiClient } from '@/api'
 import type { components } from '@/api.d'
 import { useTime } from '@/composables/useTime'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 
 type SystemInfo = components['schemas']['SystemInfo']
 
@@ -77,6 +80,21 @@ const hostnameDirty = computed(
     hostname.value !== time.systemConfig.value.wifi_hostname
 )
 
+// ---------- copy ----------
+const justCopied = ref<string | null>(null)
+async function copy(value: string | null | undefined, label: string) {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    justCopied.value = label
+    setTimeout(() => {
+      if (justCopied.value === label) justCopied.value = null
+    }, 1500)
+  } catch {
+    toast({ title: "Couldn't copy", variant: 'destructive' })
+  }
+}
+
 async function saveHostname() {
   if (!hostnameDirty.value) return
   hostnameSaving.value = true
@@ -86,7 +104,7 @@ async function saveHostname() {
   } catch (e) {
     toast({
       title: "Couldn't save hostname",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -176,7 +194,20 @@ async function saveHostname() {
           </div>
           <div class="flex flex-col gap-0.5">
             <dt class="text-xs text-muted-foreground">IP address</dt>
-            <dd class="num">{{ systemInfo.ip ?? '—' }}</dd>
+            <dd v-if="systemInfo.ip" class="flex items-center gap-1.5">
+              <span class="num">{{ systemInfo.ip }}</span>
+              <button
+                type="button"
+                class="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                :aria-label="`Copy ${systemInfo.ip}`"
+                title="Copy"
+                @click="copy(systemInfo.ip, 'ip')"
+              >
+                <Check v-if="justCopied === 'ip'" class="size-3 text-emerald-500" />
+                <Copy v-else class="size-3" />
+              </button>
+            </dd>
+            <dd v-else class="num">—</dd>
           </div>
           <div class="flex flex-col gap-0.5">
             <dt class="text-xs text-muted-foreground">Signal</dt>

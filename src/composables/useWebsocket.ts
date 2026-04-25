@@ -1,4 +1,4 @@
-import { onBeforeUnmount } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import { API_BASE } from '@/api'
 import type { components } from '@/api.d'
 
@@ -17,6 +17,13 @@ let socket: WebSocket | null = null
 let retry = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+// Shared connection status — true once we've ever opened, false on close. The
+// initial `false` covers the brief pre-open window so the disconnect indicator
+// doesn't flash on first load (consumers should treat the first 1-2s as a
+// "connecting" grace period).
+const connected = ref(false)
+const everConnected = ref(false)
+
 function connect() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return
@@ -24,6 +31,8 @@ function connect() {
   socket = new WebSocket(WS_URL)
   socket.onopen = () => {
     retry = 0
+    connected.value = true
+    everConnected.value = true
   }
   socket.onmessage = (msg) => {
     let ev: WsEvent
@@ -39,6 +48,7 @@ function connect() {
   }
   socket.onclose = () => {
     socket = null
+    connected.value = false
     scheduleReconnect()
   }
   socket.onerror = () => {
@@ -82,5 +92,5 @@ export function useWebsocket() {
     disposers.length = 0
   })
 
-  return { on }
+  return { on, connected, everConnected }
 }

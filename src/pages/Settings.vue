@@ -36,14 +36,13 @@ import {
   Wifi,
   WifiLow,
   WifiOff,
-  Wrench,
   Globe,
-  Grid3x3,
 } from 'lucide-vue-next'
 import { apiClient } from '@/api'
 import type { components } from '@/api.d'
 import { useTime } from '@/composables/useTime'
 import { useModules } from '@/composables/useModules'
+import { useSchedules } from '@/composables/useSchedules'
 
 type Settings = components['schemas']['Settings']
 type QuietWindow = components['schemas']['QuietWindow']
@@ -51,7 +50,7 @@ type QuietHours = components['schemas']['QuietHours']
 type AboutInfo = components['schemas']['AboutInfo']
 type SystemInfo = components['schemas']['SystemInfo']
 
-const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
+const DAY_LABELS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'] as const
 const DAY_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
 
 // ---------- Device card ----------
@@ -155,11 +154,25 @@ const quietDirty = computed(() => {
 // ---------- Setup subpage summaries ----------
 const time = useTime()
 const { modules } = useModules()
+const schedules = useSchedules()
 const gridSummary = computed(() => {
   const g = systemInfo.value?.grid
   if (!g) return null
-  return `${g.width} × ${g.height} · ${g.mapped} mapped`
+  return `${g.width} × ${g.height} · ${g.mapped} placed`
 })
+
+// ---------- "What runs?" dialog ----------
+const whatRunsOpen = ref(false)
+const obeyingSchedules = computed(() =>
+  schedules.schedules.value.filter(
+    (s) => s.enabled && s.obey_quiet_hours
+  )
+)
+const ignoringSchedules = computed(() =>
+  schedules.schedules.value.filter(
+    (s) => s.enabled && !s.obey_quiet_hours
+  )
+)
 
 // ---------- Actions (reboot) ----------
 const rebootOpen = ref(false)
@@ -255,6 +268,13 @@ onMounted(() => {
             <CardTitle>Quiet hours</CardTitle>
             <CardDescription>
               Schedules won't run during these windows.
+              <button
+                type="button"
+                class="text-primary hover:underline"
+                @click="whatRunsOpen = true"
+              >
+                What runs?
+              </button>
             </CardDescription>
           </div>
           <Badge v-if="quiet" :variant="quiet.is_quiet_now ? 'warn' : 'outline'">
@@ -387,41 +407,6 @@ onMounted(() => {
             <ChevronRight class="size-4 text-muted-foreground" />
           </RouterLink>
           <RouterLink
-            to="/settings/calibration"
-            class="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/50"
-          >
-            <span
-              class="flex size-9 items-center justify-center rounded-md bg-primary/10 text-primary"
-            >
-              <Wrench class="size-4" />
-            </span>
-            <span class="flex min-w-0 flex-1 flex-col">
-              <span class="font-medium">Calibration</span>
-              <span class="text-xs text-muted-foreground">
-                {{ modules.length }} module{{ modules.length === 1 ? '' : 's' }}
-                connected
-              </span>
-            </span>
-            <ChevronRight class="size-4 text-muted-foreground" />
-          </RouterLink>
-          <RouterLink
-            to="/settings/grid"
-            class="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/50"
-          >
-            <span
-              class="flex size-9 items-center justify-center rounded-md bg-primary/10 text-primary"
-            >
-              <Grid3x3 class="size-4" />
-            </span>
-            <span class="flex min-w-0 flex-1 flex-col">
-              <span class="font-medium">Grid management</span>
-              <span class="text-xs text-muted-foreground">
-                {{ gridSummary ?? '—' }}
-              </span>
-            </span>
-            <ChevronRight class="size-4 text-muted-foreground" />
-          </RouterLink>
-          <RouterLink
             to="/settings/modules"
             class="flex items-center gap-4 px-6 py-4 transition-colors hover:bg-muted/50"
           >
@@ -433,7 +418,8 @@ onMounted(() => {
             <span class="flex min-w-0 flex-1 flex-col">
               <span class="font-medium">Modules</span>
               <span class="text-xs text-muted-foreground">
-                {{ modules.length }} connected · firmware updates
+                {{ modules.length }} connected
+                <template v-if="gridSummary"> · {{ gridSummary }}</template>
               </span>
             </span>
             <ChevronRight class="size-4 text-muted-foreground" />
@@ -484,5 +470,60 @@ onMounted(() => {
         </Dialog>
       </CardFooter>
     </Card>
+
+    <!-- What runs during quiet hours -->
+    <Dialog v-model:open="whatRunsOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Schedules &amp; quiet hours</DialogTitle>
+          <DialogDescription>
+            Quiet hours skip schedules tagged "honor quiet hours".
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 text-sm">
+          <div class="flex flex-col gap-1.5">
+            <span class="text-xs text-muted-foreground">
+              Skipped during quiet hours
+            </span>
+            <ul
+              v-if="obeyingSchedules.length"
+              class="flex flex-col gap-1"
+            >
+              <li
+                v-for="s in obeyingSchedules"
+                :key="s.id"
+                class="rounded-md border border-border bg-muted/30 px-3 py-1.5"
+              >
+                {{ s.name }}
+              </li>
+            </ul>
+            <p v-else class="text-xs text-muted-foreground">None.</p>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <span class="text-xs text-muted-foreground">
+              Always run, even during quiet hours
+            </span>
+            <ul
+              v-if="ignoringSchedules.length"
+              class="flex flex-col gap-1"
+            >
+              <li
+                v-for="s in ignoringSchedules"
+                :key="s.id"
+                class="rounded-md border border-border bg-muted/30 px-3 py-1.5"
+              >
+                {{ s.name }}
+              </li>
+            </ul>
+            <p v-else class="text-xs text-muted-foreground">None.</p>
+          </div>
+        </div>
+        <DialogFooter>
+          <DialogClose as-child>
+            <Button>Close</Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

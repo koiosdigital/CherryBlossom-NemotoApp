@@ -35,6 +35,7 @@ import { useSchedules } from '@/composables/useSchedules'
 import { useTime } from '@/composables/useTime'
 import { useFlaps } from '@/composables/useFlaps'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 import { describeCron, nextFire, parseCron } from '@/lib/cron'
 import ScheduleEditor from '@/components/ScheduleEditor.vue'
 
@@ -70,7 +71,7 @@ function describe(s: Schedule): string {
   try {
     return describeCron(parseCron(s.cron))
   } catch (e) {
-    return e instanceof Error ? e.message : 'invalid schedule'
+    return friendlyError(e, 'invalid schedule')
   }
 }
 
@@ -185,7 +186,7 @@ async function toggleEnabled(s: Schedule) {
   } catch (e) {
     toast({
       title: "Couldn't update schedule",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -211,7 +212,7 @@ async function runNow(s: Schedule, force = false) {
     } else {
       toast({
         title: "Couldn't run",
-        description: e instanceof Error ? e.message : String(e),
+        description: friendlyError(e),
         variant: 'destructive',
       })
     }
@@ -252,7 +253,7 @@ async function confirmDelete() {
   } catch (e) {
     toast({
       title: "Couldn't delete",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -431,7 +432,7 @@ async function confirmDelete() {
                       : 'Create your first schedule to show a preset on a timer.'
                 }}
               </p>
-              <Button v-if="tab === 'all'" @click="openNew" class="mt-3">
+              <Button @click="openNew" class="mt-3">
                 <Plus />
                 New schedule
               </Button>

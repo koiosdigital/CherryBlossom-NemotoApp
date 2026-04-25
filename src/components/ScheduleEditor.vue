@@ -21,6 +21,7 @@ import { useFlaps } from '@/composables/useFlaps'
 import { useTime } from '@/composables/useTime'
 import { useSchedules } from '@/composables/useSchedules'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 import {
   buildCron,
   describeCron,
@@ -49,15 +50,16 @@ const schedules = useSchedules()
 const { toast } = useToast()
 
 // ---------- form state ----------
-type Mode = 'every_minutes' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'custom'
+type Mode = 'repeating' | 'daily' | 'weekly' | 'monthly' | 'custom'
+type RepeatUnit = 'minutes' | 'hours'
 type ActionType = 'display_preset' | 'display_solid' | 'clear'
 
 const name = ref('')
 const enabled = ref(true)
 const obeyQuiet = ref(true)
 const mode = ref<Mode>('daily')
-const everyN = ref(15)
-const hourlyMinute = ref(0)
+const repeatUnit = ref<RepeatUnit>('minutes')
+const repeatN = ref(15)
 const dailyTime = ref('09:00')
 const weeklyDays = ref<number[]>([1, 2, 3, 4, 5])
 const weeklyTime = ref('09:00')
@@ -85,7 +87,7 @@ function parseTime(s: string): { h: number; m: number } {
   return { h: h || 0, m: m || 0 }
 }
 
-const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'] as const
+const DAY_LABELS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'] as const
 const DAY_FULL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
 
 function toggleWeeklyDay(d: number) {
@@ -100,12 +102,14 @@ function toggleWeeklyDay(d: number) {
 const builtCron = computed<string>(() => {
   let template: CronTemplate
   switch (mode.value) {
-    case 'every_minutes':
-      template = { kind: 'every_minutes', n: Math.max(1, Math.min(59, everyN.value)) }
+    case 'repeating': {
+      const n = clampInt(repeatN.value, 1, repeatUnit.value === 'minutes' ? 59 : 23)
+      template =
+        repeatUnit.value === 'minutes'
+          ? { kind: 'every_minutes', n }
+          : { kind: 'custom', cron: `0 */${n} * * *` }
       break
-    case 'hourly':
-      template = { kind: 'hourly', minute: clampInt(hourlyMinute.value, 0, 59) }
-      break
+    }
     case 'daily': {
       const t = parseTime(dailyTime.value)
       template = { kind: 'daily', hour: t.h, minute: t.m }
@@ -150,7 +154,7 @@ const description = computed(() => {
     const spec = parseCron(builtCron.value)
     return describeCron(spec)
   } catch (e) {
-    cronError.value = e instanceof Error ? e.message : String(e)
+    cronError.value = friendlyError(e)
     return null
   }
 })
@@ -213,8 +217,8 @@ watch(
       obeyQuiet.value = true
       mode.value = 'daily'
       dailyTime.value = '09:00'
-      everyN.value = 15
-      hourlyMinute.value = 0
+      repeatUnit.value = 'minutes'
+      repeatN.value = 15
       weeklyDays.value = [1, 2, 3, 4, 5]
       weeklyTime.value = '09:00'
       monthlyDay.value = 1
@@ -231,12 +235,15 @@ watch(
 function applyTemplate(t: CronTemplate) {
   switch (t.kind) {
     case 'every_minutes':
-      mode.value = 'every_minutes'
-      everyN.value = t.n
+      mode.value = 'repeating'
+      repeatUnit.value = 'minutes'
+      repeatN.value = t.n
       break
     case 'hourly':
-      mode.value = 'hourly'
-      hourlyMinute.value = t.minute
+      // Old "hourly at minute M" becomes Custom — no clean fit in the new
+      // Repeating mode (which only supports the every-N-of-unit shape).
+      mode.value = 'custom'
+      customCron.value = `${t.minute} * * * *`
       break
     case 'daily':
       mode.value = 'daily'
@@ -297,7 +304,7 @@ async function save() {
   } catch (e) {
     toast({
       title: "Couldn't save schedule",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -306,8 +313,7 @@ async function save() {
 }
 
 const MODE_LABELS: Record<Mode, string> = {
-  every_minutes: 'Repeat',
-  hourly: 'Hourly',
+  repeating: 'Repeating',
   daily: 'Daily',
   weekly: 'Weekly',
   monthly: 'Monthly',
@@ -320,7 +326,30 @@ const ACTION_LABELS: Record<ActionType, string> = {
   clear: 'Clear display',
 }
 
-const flapOptions = computed(() => flaps.flaps.value)
+const FLAP_GROUP_LABELS = {
+  letter: 'Letters',
+  digit: 'Digits',
+  special: 'Specials',
+  blank: 'Blank',
+  color: 'Colors',
+} as const
+
+const flapGroups = computed(() => {
+  const order: Array<keyof typeof FLAP_GROUP_LABELS> = [
+    'letter',
+    'digit',
+    'special',
+    'color',
+    'blank',
+  ]
+  return order
+    .map((kind) => ({
+      kind,
+      label: FLAP_GROUP_LABELS[kind],
+      flaps: flaps.flaps.value.filter((f) => f.type === kind),
+    }))
+    .filter((g) => g.flaps.length > 0)
+})
 </script>
 
 <template>
@@ -368,28 +397,31 @@ const flapOptions = computed(() => flaps.flaps.value)
 
           <!-- Mode-specific controls -->
           <div class="rounded-md border border-border bg-card p-3">
-            <div v-if="mode === 'every_minutes'" class="flex items-center gap-2 text-sm">
+            <div v-if="mode === 'repeating'" class="flex items-center gap-2 text-sm">
               <span>Every</span>
               <Input
                 type="number"
                 :min="1"
-                :max="59"
-                v-model.number="everyN"
+                :max="repeatUnit === 'minutes' ? 59 : 23"
+                v-model.number="repeatN"
                 class="w-20"
               />
-              <span>minutes</span>
-            </div>
-
-            <div v-else-if="mode === 'hourly'" class="flex items-center gap-2 text-sm">
-              <span>At minute</span>
-              <Input
-                type="number"
-                :min="0"
-                :max="59"
-                v-model.number="hourlyMinute"
-                class="w-20"
-              />
-              <span>of every hour</span>
+              <div class="flex rounded-md border border-border bg-muted/30 p-0.5">
+                <button
+                  v-for="u in (['minutes', 'hours'] as const)"
+                  :key="u"
+                  type="button"
+                  class="rounded-sm px-2.5 py-1 text-xs font-medium transition-colors"
+                  :class="
+                    repeatUnit === u
+                      ? 'bg-card text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  "
+                  @click="repeatUnit = u"
+                >
+                  {{ u }}
+                </button>
+              </div>
             </div>
 
             <div v-else-if="mode === 'daily'" class="flex items-center gap-2 text-sm">
@@ -528,31 +560,40 @@ const flapOptions = computed(() => flaps.flaps.value)
 
           <div
             v-else-if="actionType === 'display_solid'"
-            class="flex flex-col gap-1.5"
+            class="flex flex-col gap-2"
           >
             <div
-              class="grid max-h-40 grid-cols-8 gap-1 overflow-y-auto rounded-md border border-border p-2 sm:grid-cols-12"
+              class="flex max-h-56 flex-col gap-3 overflow-y-auto rounded-md border border-border p-2"
             >
-              <button
-                v-for="f in flapOptions"
-                :key="f.id"
-                type="button"
-                class="flex aspect-square items-center justify-center rounded-sm border text-xs font-mono transition-colors"
-                :class="
-                  solidFlap === f.id
-                    ? 'border-primary ring-2 ring-primary/40'
-                    : 'border-border hover:border-primary/50'
-                "
-                :style="
-                  f.color
-                    ? { background: f.color, color: '#fff' }
-                    : { background: 'hsl(var(--muted))' }
-                "
-                :title="f.label"
-                @click="solidFlap = f.id"
+              <div
+                v-for="g in flapGroups"
+                :key="g.kind"
+                class="flex flex-col gap-1.5"
               >
-                {{ f.glyph ?? '' }}
-              </button>
+                <span class="text-xs text-muted-foreground">{{ g.label }}</span>
+                <div class="grid grid-cols-8 gap-1 sm:grid-cols-12">
+                  <button
+                    v-for="f in g.flaps"
+                    :key="f.id"
+                    type="button"
+                    class="flex aspect-square items-center justify-center rounded-sm border text-xs font-mono transition-colors"
+                    :class="
+                      solidFlap === f.id
+                        ? 'border-primary ring-2 ring-primary/40'
+                        : 'border-border hover:border-primary/50'
+                    "
+                    :style="
+                      f.color
+                        ? { background: f.color, color: '#fff' }
+                        : undefined
+                    "
+                    :title="f.label"
+                    @click="solidFlap = f.id"
+                  >
+                    {{ f.glyph ?? '' }}
+                  </button>
+                </div>
+              </div>
             </div>
             <p
               v-if="solidFlap == null"

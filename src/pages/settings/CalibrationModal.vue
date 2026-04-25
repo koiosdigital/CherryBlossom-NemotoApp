@@ -13,6 +13,7 @@ import {
 import { Check, Loader2, Play, Save } from 'lucide-vue-next'
 import { useModules } from '@/composables/useModules'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 import { useWebsocket } from '@/composables/useWebsocket'
 
 const props = defineProps<{
@@ -65,7 +66,7 @@ ws.on('module.rebooted', (ev) => {
   })
 })
 
-function waitForHomed(target: boolean, timeoutMs = 60000) {
+function waitForHomed(target: boolean, timeoutMs = 20000) {
   return new Promise<void>((resolve, reject) => {
     if (status.value?.homed === target) return resolve()
     const timer = setTimeout(() => {
@@ -108,7 +109,7 @@ async function startCalibration() {
     await modules.action(uuid, { action: 'calibrate', param: { step: 'start' } })
     state.value = 'calibrating'
   } catch (e) {
-    errorText.value = e instanceof Error ? e.message : String(e)
+    errorText.value = friendlyError(e)
     state.value = 'error'
     toast({
       title: "Couldn't start calibration",
@@ -161,7 +162,7 @@ async function finishAndClose(silent = false) {
     } catch (e) {
       toast({
         title: "Couldn't save",
-        description: e instanceof Error ? e.message : String(e),
+        description: friendlyError(e),
         variant: 'destructive',
       })
     }

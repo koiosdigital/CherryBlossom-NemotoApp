@@ -5,8 +5,6 @@ const Presets = () => import('@/pages/Presets.vue')
 const Schedules = () => import('@/pages/Schedules.vue')
 const Settings = () => import('@/pages/Settings.vue')
 const SettingsTime = () => import('@/pages/settings/Time.vue')
-const SettingsCalibration = () => import('@/pages/settings/Calibration.vue')
-const SettingsGrid = () => import('@/pages/settings/Grid.vue')
 const SettingsModules = () => import('@/pages/settings/Modules.vue')
 const SettingsNetwork = () => import('@/pages/settings/Network.vue')
 const Editor = () => import('@/pages/Editor.vue')
@@ -20,12 +18,6 @@ export const router = createRouter({
     { path: '/settings', name: 'settings', component: Settings },
     { path: '/settings/time', name: 'settings.time', component: SettingsTime },
     {
-      path: '/settings/calibration',
-      name: 'settings.calibration',
-      component: SettingsCalibration,
-    },
-    { path: '/settings/grid', name: 'settings.grid', component: SettingsGrid },
-    {
       path: '/settings/modules',
       name: 'settings.modules',
       component: SettingsModules,
@@ -35,6 +27,9 @@ export const router = createRouter({
       name: 'settings.network',
       component: SettingsNetwork,
     },
+    // Backwards-compat redirects for the now-merged settings pages.
+    { path: '/settings/calibration', redirect: '/settings/modules' },
+    { path: '/settings/grid', redirect: '/settings/modules' },
     { path: '/editor', name: 'editor', component: Editor },
   ],
 })

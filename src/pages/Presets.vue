@@ -28,6 +28,7 @@ import { apiClient } from '@/api'
 import type { components } from '@/api.d'
 import { useDisplay } from '@/composables/useDisplay'
 import { useToast } from '@/composables/useToast'
+import { friendlyError } from '@/lib/errors'
 
 type PresetMeta = components['schemas']['PresetMeta']
 
@@ -67,7 +68,7 @@ async function showPreset(p: PresetMeta) {
   } catch (e) {
     toast({
       title: "Couldn't show preset",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -97,7 +98,7 @@ async function confirmDelete() {
   } catch (e) {
     toast({
       title: "Couldn't delete",
-      description: e instanceof Error ? e.message : String(e),
+      description: friendlyError(e),
       variant: 'destructive',
     })
   } finally {
@@ -169,15 +170,7 @@ onMounted(load)
                 class="border-b border-border last:border-b-0 transition-colors hover:bg-muted/40 [&>td]:px-4 [&>td]:py-3"
               >
                 <td>
-                  <div class="flex items-center gap-2">
-                    <span class="font-medium">{{ p.name }}</span>
-                    <Badge
-                      v-if="display.currentPresetId.value === p.id"
-                      variant="success"
-                    >
-                      Showing
-                    </Badge>
-                  </div>
+                  <span class="font-medium">{{ p.name }}</span>
                 </td>
                 <td
                   class="hidden text-xs text-muted-foreground num sm:table-cell"
@@ -187,18 +180,16 @@ onMounted(load)
                 <td>
                   <div class="flex justify-end gap-1">
                     <Button
-                      variant="ghost"
-                      size="icon"
-                      :disabled="runningId !== null"
+                      size="sm"
+                      :disabled="runningId !== null || display.currentPresetId.value === p.id"
                       @click="showPreset(p)"
-                      aria-label="Show on display"
-                      title="Show on display"
                     >
                       <Loader2
                         v-if="runningId === p.id"
                         class="animate-spin"
                       />
                       <Play v-else />
+                      {{ display.currentPresetId.value === p.id ? 'Showing' : 'Show' }}
                     </Button>
                     <Button
                       variant="ghost"
