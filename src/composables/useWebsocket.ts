@@ -12,17 +12,19 @@ type Handler<T extends WsEventType> = (ev: WsEventOf<T>) => void
 type AnyHandler = (ev: WsEvent) => void
 
 const handlers = new Map<WsEventType | '*', Set<AnyHandler>>()
+const reconnectListeners = new Set<() => void>()
 
 let socket: WebSocket | null = null
-let retry = 0
+let backoff = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let visibilityWired = false
 
-// Shared connection status — true once we've ever opened, false on close. The
-// initial `false` covers the brief pre-open window so the disconnect indicator
-// doesn't flash on first load (consumers should treat the first 1-2s as a
-// "connecting" grace period).
+// Shared connection status. `everConnected` flips true on first successful
+// open and never resets — so consumers can distinguish "still handshaking" from
+// "we lost the connection".
 const connected = ref(false)
 const everConnected = ref(false)
+const reconnectAttempts = ref(0)
 
 function connect() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
@@ -30,9 +32,19 @@ function connect() {
   }
   socket = new WebSocket(WS_URL)
   socket.onopen = () => {
-    retry = 0
+    const wasReconnect = everConnected.value
+    backoff = 0
+    reconnectAttempts.value = 0
     connected.value = true
     everConnected.value = true
+    if (wasReconnect) {
+      // Welcome events from the device re-seed grid / modules / display on
+      // their own. This hook lets composables that don't subscribe to
+      // welcome (schedules, bootloader, etc.) refresh their state.
+      reconnectListeners.forEach((fn) => {
+        try { fn() } catch { /* swallow — one bad listener shouldn't poison the rest */ }
+      })
+    }
   }
   socket.onmessage = (msg) => {
     let ev: WsEvent
@@ -58,15 +70,52 @@ function connect() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return
-  const delay = Math.min(1000 * 2 ** retry, 15000)
-  retry += 1
+  // Aggressive backoff for a local-network app: 500ms, 1s, 2s, 4s, then cap
+  // at 5s. The display's web server is right there — long backoffs just feel
+  // broken.
+  const delay = Math.min(500 * 2 ** Math.min(backoff, 3), 5000)
+  backoff += 1
+  reconnectAttempts.value = backoff
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     connect()
   }, delay)
 }
 
+function forceReconnect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  backoff = 0
+  reconnectAttempts.value = 0
+  if (socket && socket.readyState !== WebSocket.OPEN) {
+    try { socket.close() } catch { /* already closed */ }
+    socket = null
+  }
+  connect()
+}
+
+// When the tab becomes visible again or the network comes back, browsers
+// don't always synthesise a close event — the socket can sit half-open. Force
+// a reconnect check on these signals.
+function wireVisibility() {
+  if (visibilityWired || typeof document === 'undefined') return
+  visibilityWired = true
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !connected.value) {
+      forceReconnect()
+    }
+  })
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', () => {
+      if (!connected.value) forceReconnect()
+    })
+  }
+}
+
 export function useWebsocket() {
+  wireVisibility()
   connect()
 
   const disposers: Array<() => void> = []
@@ -87,10 +136,26 @@ export function useWebsocket() {
     return dispose
   }
 
+  function onReconnect(fn: () => void): () => void {
+    reconnectListeners.add(fn)
+    const dispose = () => {
+      reconnectListeners.delete(fn)
+    }
+    disposers.push(dispose)
+    return dispose
+  }
+
   onBeforeUnmount(() => {
     disposers.forEach((d) => d())
     disposers.length = 0
   })
 
-  return { on, connected, everConnected }
+  return {
+    on,
+    onReconnect,
+    connected,
+    everConnected,
+    reconnectAttempts,
+    forceReconnect,
+  }
 }

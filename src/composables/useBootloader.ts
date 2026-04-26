@@ -53,6 +53,11 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
       image_blocks: ev.data.image_blocks,
     }
   })
+  // Resync after a reconnect so an OTA that started or finished during the
+  // outage shows up correctly.
+  ws.onReconnect(() => {
+    load(true).catch(() => {})
+  })
 }
 
 export function useBootloader() {

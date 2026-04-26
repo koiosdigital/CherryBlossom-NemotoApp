@@ -55,6 +55,11 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
       })
       .catch(() => {})
   })
+  // Schedules aren't in the welcome payload — pull a fresh list whenever the
+  // socket reconnects so anything created or fired during the outage shows up.
+  ws.onReconnect(() => {
+    load(true).catch(() => {})
+  })
 }
 
 export function useSchedules() {
