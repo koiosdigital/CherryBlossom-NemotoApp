@@ -687,29 +687,40 @@ export interface paths {
          *     it doesn't match the upload is rejected with `ok:false` and no session
          *     is started.
          *
+         *     ## Fleet OTA vs single-device
+         *
+         *     With no query, the upload starts a **fleet OTA**: broadcast
+         *     `ENTER_BOOTLOADER`, discover every bootloader, then flash them one
+         *     at a time. With `?short_id=<N>`, the upload starts a
+         *     **single-device OTA** against that short_id (the target must
+         *     already be in bootloader mode).
+         *
          *     On success the session is dispatched to a worker task and the FSM
-         *     moves through `arming → connecting → flashing → finalizing →
-         *     rediscover → success` (or `failed` / `aborted`). Subscribe to the
-         *     WebSocket `bootloader.*` events for live state and progress.
+         *     moves through `arming → discovering → flashing → rediscover →
+         *     success` (fleet) or `flashing → success` (single-device).
+         *     Subscribe to the WebSocket `bootloader.*` events for live state
+         *     and progress.
          *
-         *     ## Failure modes covered
+         *     ## Failure modes
          *
-         *     * **No app on devices (cold boot):** pass `?assume_in_bl=1` to skip
-         *       the ENTER_BOOTLOADER broadcast — devices already in SakuraBoot
-         *       will respond to CONNECT immediately.
-         *     * **Some devices missed ENTER_BOOTLOADER:** they keep running their
-         *       old firmware and don't appear in `bl_responding`. Re-running the
-         *       OTA picks them up on the next broadcast.
-         *     * **Block ACK timeout:** the host retries each `SEND_BLOCK` up to 3×
-         *       before failing with `block_ack_timeout`.
-         *     * **Devices that don't reboot:** `rediscover` waits 8 s for
-         *       `DEVICE_BOOTED` events; `devices[].came_back=false` flags any
-         *       UUIDs that didn't return.
-         *     * **Bus too degraded for ACK roundtrips:** pass `?emergency=1` to run
-         *       fire-and-forget — no CONNECT/SEND_BLOCK/EOF/COMPLETE ACK waits,
-         *       every block transmitted 3× back-to-back with extra pacing. Always
-         *       ends in `success`; rely on the post-OTA discovery snapshot to see
-         *       which modules actually came back.
+         *     Per-device failures are recorded in `devices[].state = failed` with
+         *     a `fail_step` discriminator (`connect`, `send_block`, `eof`, or
+         *     `complete`). The fleet loop continues past per-device failures —
+         *     the session-level `fail_reason` only fires on global problems
+         *     (`no_bootloaders` if discovery finds none, `invalid_image`,
+         *     `aborted_by_user`, or `internal`).
+         *
+         *     ## Recovery
+         *
+         *     * **No app on devices (cold boot):** pass `?assume_in_bl=1` to
+         *       skip the ENTER_BOOTLOADER broadcast — useful for fresh hardware
+         *       where the bootloader auto-stays.
+         *     * **Single device stuck mid-flash:** pass `?short_id=<N>` after
+         *       identifying the stuck device. Re-runs the per-device flow only.
+         *     * **Some devices failed:** re-run the fleet OTA. Devices already
+         *       on the new firmware (assigned, hw_type=sakura) ignore the
+         *       broadcast and re-discover normally; only bootloader-mode
+         *       devices get re-flashed.
          */
         post: operations["uploadBootloader"];
         delete?: never;
@@ -754,15 +765,19 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Detect whether any device is currently in SakuraBoot
-         * @description Sends a single Katapult `CONNECT` on the admin channel and reports
-         *     whether at least one device replied. Useful for diagnosing devices
-         *     that boot into the bootloader because they have no valid app
-         *     installed (the bootloader stays put when the app vector table at
-         *     `0x08002400` is invalid).
+         * Count the bootloader-mode devices currently on the bus
+         * @description Runs the bridge's normal device discovery and reports how many of
+         *     the resulting registry entries report `hw_type = HW_TYPE_SAKURA_BOOT`
+         *     (0xB0). A non-zero count means the host has bootloader-mode
+         *     devices addressable by short_id and ready for `start_one` or
+         *     `start_fleet?assume_in_bl=1`.
          *
-         *     Refuses (`409 Conflict`) if a session is currently active — the
-         *     probe would clash with the OTA's own CONNECT flow.
+         *     Useful for diagnosing devices that boot into the bootloader
+         *     because they have no valid app installed (the bootloader
+         *     auto-stays when the app vector table at `0x08002400` is
+         *     invalid).
+         *
+         *     Refuses (`409 Conflict`) if a session is currently active.
          */
         post: operations["probeBootloader"];
         delete?: never;
@@ -1641,45 +1656,65 @@ export interface components {
          * @description Top-level FSM state for the OTA coordinator.
          *     * `idle` — no session ever started, or last one is fully torn down
          *     * `arming` — broadcast `ENTER_BOOTLOADER`; waiting for devices to reset
-         *     * `connecting` — sending `CONNECT`; waiting for the first ACK
-         *     * `flashing` — streaming `SEND_BLOCK` frames sequentially
-         *     * `finalizing` — `EOF` then `COMPLETE` sent; devices reset themselves
-         *     * `rediscover` — listening for `DEVICE_BOOTED` events from re-flashed devices
-         *     * `success` — terminal: at least one device acked the full sequence
-         *     * `failed` — terminal: see `fail_reason`
+         *     * `discovering` — running `QUERY_UNASSIGNED + ASSIGN_ID` against
+         *       bootloader-mode devices (fleet only)
+         *     * `flashing` — iterating bootloaders sequentially; for each, the
+         *       per-device CONNECT → SEND_BLOCK × N → EOF → COMPLETE runs in
+         *       this same state with `current_short_id` indicating progress
+         *     * `rediscover` — devices rebooting into the new app; the bridge
+         *       re-discovers them and re-assigns short_ids (fleet only)
+         *     * `success` — terminal: every reachable device completed; per-device
+         *       failures are recorded in `devices[].state` but do not flip the
+         *       session into `failed`
+         *     * `failed` — terminal: see `fail_reason` (global problems only)
          *     * `aborted` — terminal: user cancelled mid-flight via `/abort`
          * @enum {string}
          */
-        BootloaderState: "idle" | "arming" | "connecting" | "flashing" | "finalizing" | "rediscover" | "success" | "failed" | "aborted";
+        BootloaderState: "idle" | "arming" | "discovering" | "flashing" | "rediscover" | "success" | "failed" | "aborted";
         /**
-         * @description Discriminator for terminal `failed` state. `none` when the session
-         *     is in-flight or finished successfully.
-         *     * `no_bootloaders` — `CONNECT` got no ACK after retries (devices
-         *       weren't in BL, or bus is offline)
-         *     * `block_ack_timeout` — a `SEND_BLOCK` exhausted retries (default 3)
-         *     * `block_nacked` — bootloader returned `COMMAND_ERROR` (flash write
-         *       failure or out-of-range address)
-         *     * `eof_failed` — `EOF` got no ACK
-         *     * `complete_failed` — `COMPLETE` send failed at the CAN layer
+         * @description Discriminator for terminal session-level `failed` state. `none`
+         *     when the session is in-flight or finished successfully. Per-device
+         *     failures live in `devices[].fail_step` and don't bubble up here.
+         *     * `no_bootloaders` — discovery returned 0 bootloader-mode devices
          *     * `invalid_image` — metadata magic / size validation failed
          *     * `aborted_by_user` — `/api/bootloader/abort` was honored
          *     * `internal` — host-side error (e.g. `ENTER_BOOTLOADER` broadcast failed)
          * @enum {string}
          */
-        BootloaderFailReason: "none" | "no_bootloaders" | "block_ack_timeout" | "block_nacked" | "eof_failed" | "complete_failed" | "invalid_image" | "aborted_by_user" | "internal";
+        BootloaderFailReason: "none" | "no_bootloaders" | "invalid_image" | "aborted_by_user" | "internal";
         /**
-         * @description Per-device entry from the pre-OTA snapshot. `came_back` flips true
-         *     when the host observes a `DEVICE_BOOTED` event for this UUID after
-         *     `COMPLETE`. `new_fw` is populated only when `came_back=true`.
+         * @description Per-device state during a fleet OTA. `queued` until the orchestrator
+         *     picks the device, `flashing` while it's the current target,
+         *     terminal at `done` or `failed`.
+         * @enum {string}
+         */
+        BootloaderDeviceState: "queued" | "flashing" | "done" | "failed";
+        /**
+         * @description Which step of the per-device pipeline failed. `none` when the
+         *     device's `state` is anything other than `failed`.
+         *     * `connect` — no CONNECT ACK from this device after retries
+         *     * `send_block` — a `SEND_BLOCK` exhausted retries for this device
+         *     * `eof` — `EOF` ACK never arrived
+         *     * `complete` — `COMPLETE` failed at the CAN layer
+         * @enum {string}
+         */
+        BootloaderFailStep: "none" | "connect" | "send_block" | "eof" | "complete";
+        /**
+         * @description Per-device entry in the OTA session. Created when the device is
+         *     discovered as a bootloader (or, for single-device OTA, seeded
+         *     from the registry at start). `state` and `fail_step` track the
+         *     per-device pipeline; `came_back` flips true once the device
+         *     re-announces in app mode (`hw_type = sakura`) during the
+         *     post-OTA registry refresh.
          */
         BootloaderDevice: {
             uuid: components["schemas"]["Uuid"];
             short_id: components["schemas"]["ShortId"];
-            /** @description True if assigned to a short_id pre-OTA. */
-            was_assigned: boolean;
-            /** @description True if a DEVICE_BOOTED event was observed post-OTA. */
+            state: components["schemas"]["BootloaderDeviceState"];
+            fail_step: components["schemas"]["BootloaderFailStep"];
+            /** @description True once the device is back in the registry as hw_type=sakura. */
             came_back: boolean;
-            /** @description Firmware version reported in the post-OTA boot event; null if no event seen. */
+            /** @description Firmware version reported by the device post-OTA; null if not yet seen. */
             new_fw: string | null;
         };
         /**
@@ -1689,38 +1724,39 @@ export interface components {
         BootloaderStatus: {
             state: components["schemas"]["BootloaderState"];
             fail_reason: components["schemas"]["BootloaderFailReason"];
-            /**
-             * @description True if this session was started with `?emergency=1`. In
-             *     emergency mode `blocks_acked` tracks `blocks_sent` because
-             *     we never wait for ACKs; treat the post-OTA `devices[].came_back`
-             *     field as the authoritative "did it work" signal.
-             */
-            emergency: boolean;
             /** @description Total uploaded image bytes (incl. 1 KB metadata page). */
             image_size: number;
-            /** @description Number of 64-byte blocks in the image. */
+            /** @description Number of 64-byte blocks per device — the per-device progress denominator. */
             image_blocks: number;
-            /** @description Blocks transmitted so far during `flashing`. */
-            blocks_sent: number;
-            /** @description Blocks the bootloader has acknowledged. Stays ≤ `blocks_sent`. */
-            blocks_acked: number;
             /** @description Firmware version parsed from the metadata page. */
             fw: string;
             /** @description Variant name from metadata (e.g. `sakura`). */
             variant: string;
             /** @description Application size in bytes from the metadata page (excludes metadata page itself). */
             app_size: number;
-            /** @description Number of devices that were assigned a short_id when the session started. */
-            pre_ota_assigned: number;
             /**
-             * @description Set to 1 once we observe at least one `CONNECT` ACK. Broadcast
-             *     OTA collapses identical responses on the bus, so this is a
-             *     "saw any response" signal rather than a true device count.
+             * @description Total number of devices queued for this OTA. For a fleet OTA,
+             *     this is the count of bootloader-mode devices found by
+             *     discovery. For a single-device OTA, this is 1.
              */
-            bl_responding: number;
-            /** @description Pre-OTA UUIDs that re-announced via `DEVICE_BOOTED` during `rediscover`. */
-            post_ota_back: number;
-            /** @description Pre-OTA snapshot, capped at 132 entries. */
+            devices_total: number;
+            /** @description Devices that completed the per-device pipeline successfully. */
+            devices_done: number;
+            /** @description Devices that hit a per-device failure (`devices[].state = failed`). */
+            devices_failed: number;
+            /**
+             * @description short_id of the device currently being flashed (0 between
+             *     devices or when not in `flashing` state).
+             */
+            current_short_id: number;
+            /** @description Blocks sent to the current device so far. */
+            current_blocks_sent: number;
+            /**
+             * @description Blocks the current device has acknowledged. Stays ≤
+             *     `current_blocks_sent`. Drives the per-device progress bar.
+             */
+            current_blocks_acked: number;
+            /** @description Per-device entries, capped at 132. Order matches the flash sequence. */
             devices: components["schemas"]["BootloaderDevice"][];
             /** @description Human-readable status line; updated on every state transition. */
             message: string;
@@ -1745,8 +1781,14 @@ export interface components {
             /** @constant */
             ok: true;
             state: components["schemas"]["BootloaderState"];
-            /** @description Echoes the `?emergency=1` query flag for this session. */
-            emergency: boolean;
+            /**
+             * @description `true` if this is a fleet OTA (no `?short_id=` query),
+             *     `false` if it's a single-device OTA. Echoes the request
+             *     mode so clients can pick the right UI shape immediately.
+             */
+            fleet: boolean;
+            /** @description Only present for single-device OTAs (`fleet=false`). */
+            short_id?: number;
             image_size: number;
             image_blocks: number;
             fw: string;
@@ -1759,19 +1801,20 @@ export interface components {
             detail: "abort requested" | "no active session";
         };
         /**
-         * @description Response to `/api/bootloader/probe`. The optional fields are only
-         *     present when `any_in_bootloader=true`.
+         * @description Response to `/api/bootloader/probe`. Reports how many
+         *     bootloader-mode devices are currently addressable.
          */
         BootloaderProbeResponse: {
             /** @constant */
             ok: true;
+            /**
+             * @description Number of registry entries currently reporting
+             *     `hw_type = HW_TYPE_SAKURA_BOOT`. Non-zero means at least one
+             *     device is in bootloader mode and ready for OTA.
+             */
+            bootloader_count: number;
+            /** @description Convenience alias for `bootloader_count > 0`. */
             any_in_bootloader: boolean;
-            /** @description Bootloader protocol version, hex (e.g. `0x10100`). */
-            proto?: string;
-            /** @description Bootloader-reported app start address (typically 0x08002000). */
-            app_addr?: number;
-            /** @description Bootloader-reported block size (typically 64). */
-            block_size?: number;
         };
         BootloaderEnterResponse: {
             ok: boolean;
@@ -2055,9 +2098,11 @@ export interface components {
             type: "quiet_hours.changed";
         };
         /**
-         * @description Fires every time the OTA FSM transitions (e.g. `arming → connecting`,
-         *     `flashing → finalizing`) and on terminal states. Payload mirrors
-         *     `GET /api/bootloader` — clients can replace local state wholesale.
+         * @description Fires every time the OTA FSM transitions (e.g. `arming →
+         *     discovering`, `flashing → rediscover`) and on every per-device
+         *     boundary inside `flashing` so clients can re-render the queue.
+         *     Payload mirrors `GET /api/bootloader` — clients can replace
+         *     local state wholesale.
          */
         WsEventBootloaderStateChanged: components["schemas"]["WsEnvelopeBase"] & {
             /** @constant */
@@ -2072,17 +2117,22 @@ export interface components {
         };
         /**
          * @description Lightweight progress beacon emitted during `flashing` (≈ every 32
-         *     blocks plus on the last block). Sent on its own to avoid flooding
-         *     the WS with full-status payloads while ~880 blocks stream past.
+         *     blocks of the current device plus on the last block). Sent on
+         *     its own to avoid flooding the WS with full-status payloads while
+         *     ~880 blocks stream past per device.
          */
         WsEventBootloaderProgress: components["schemas"]["WsEnvelopeBase"] & {
             /** @constant */
             type: "bootloader.progress";
             data: {
                 state: components["schemas"]["BootloaderState"];
-                blocks_sent: number;
-                blocks_acked: number;
+                current_short_id: number;
+                current_blocks_sent: number;
+                current_blocks_acked: number;
                 image_blocks: number;
+                devices_done: number;
+                devices_failed: number;
+                devices_total: number;
             };
         } & {
             /**
@@ -2185,32 +2235,22 @@ export interface components {
         UuidPath: components["schemas"]["Uuid"];
         IdPath: number;
         /**
-         * @description When truthy (`1`/`t`/`T`), skip the broadcast `ENTER_BOOTLOADER` step
-         *     and go straight to `CONNECT`. Use this when devices are already in
-         *     SakuraBoot — typically because they have no valid application
-         *     installed and the bootloader auto-stays.
+         * @description Fleet OTA only. When truthy (`1`/`t`/`T`), skip the broadcast
+         *     `ENTER_BOOTLOADER` step and go straight to discovery. Use when
+         *     devices are already in SakuraBoot — typically because they have
+         *     no valid application installed and the bootloader auto-stays.
+         *     Ignored when `?short_id=` is set (single-device OTA always
+         *     assumes the target is already in bootloader).
          */
         AssumeInBlQuery: "0" | "1" | "t" | "T" | "true" | "false";
         /**
-         * @description When truthy (`1`/`t`/`T`), run the OTA in **emergency / fire-and-forget
-         *     mode**:
-         *
-         *     * No CONNECT, SEND_BLOCK, EOF, or COMPLETE ACK waits.
-         *     * Each SEND_BLOCK is transmitted 3× back-to-back with extra inter-frame
-         *       and inter-block pacing.
-         *     * EOF and COMPLETE are also broadcast 3×; the COMPLETE broadcast resets
-         *       every receiving device back into the new app.
-         *     * The session always reports `success` on completion (no ACKs to fail
-         *       on); the post-OTA discovery snapshot is the authoritative "who came
-         *       back" signal.
-         *
-         *     Use when the bus is too degraded for the normal ACK-driven flow to
-         *     make progress — e.g. many modules with marginal CAN health where each
-         *     CONNECT roundtrip drops frames. Slower than the normal path, but it
-         *     gives every module multiple chances to receive each block without the
-         *     host bailing on the first missed ACK.
+         * @description If present, run a **single-device OTA** against this `short_id`
+         *     instead of a fleet OTA. The target must already be in bootloader
+         *     mode (the caller is responsible — typically via a prior fleet
+         *     discovery or by knowing the short_id from the device registry).
+         *     No `ENTER_BOOTLOADER` broadcast is sent.
          */
-        EmergencyQuery: "0" | "1" | "t" | "T" | "true" | "false";
+        ShortIdQuery: number;
     };
     requestBodies: never;
     headers: never;
@@ -3313,32 +3353,22 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description When truthy (`1`/`t`/`T`), skip the broadcast `ENTER_BOOTLOADER` step
-                 *     and go straight to `CONNECT`. Use this when devices are already in
-                 *     SakuraBoot — typically because they have no valid application
-                 *     installed and the bootloader auto-stays.
+                 * @description Fleet OTA only. When truthy (`1`/`t`/`T`), skip the broadcast
+                 *     `ENTER_BOOTLOADER` step and go straight to discovery. Use when
+                 *     devices are already in SakuraBoot — typically because they have
+                 *     no valid application installed and the bootloader auto-stays.
+                 *     Ignored when `?short_id=` is set (single-device OTA always
+                 *     assumes the target is already in bootloader).
                  */
                 assume_in_bl?: components["parameters"]["AssumeInBlQuery"];
                 /**
-                 * @description When truthy (`1`/`t`/`T`), run the OTA in **emergency / fire-and-forget
-                 *     mode**:
-                 *
-                 *     * No CONNECT, SEND_BLOCK, EOF, or COMPLETE ACK waits.
-                 *     * Each SEND_BLOCK is transmitted 3× back-to-back with extra inter-frame
-                 *       and inter-block pacing.
-                 *     * EOF and COMPLETE are also broadcast 3×; the COMPLETE broadcast resets
-                 *       every receiving device back into the new app.
-                 *     * The session always reports `success` on completion (no ACKs to fail
-                 *       on); the post-OTA discovery snapshot is the authoritative "who came
-                 *       back" signal.
-                 *
-                 *     Use when the bus is too degraded for the normal ACK-driven flow to
-                 *     make progress — e.g. many modules with marginal CAN health where each
-                 *     CONNECT roundtrip drops frames. Slower than the normal path, but it
-                 *     gives every module multiple chances to receive each block without the
-                 *     host bailing on the first missed ACK.
+                 * @description If present, run a **single-device OTA** against this `short_id`
+                 *     instead of a fleet OTA. The target must already be in bootloader
+                 *     mode (the caller is responsible — typically via a prior fleet
+                 *     discovery or by knowing the short_id from the device registry).
+                 *     No `ENTER_BOOTLOADER` broadcast is sent.
                  */
-                emergency?: components["parameters"]["EmergencyQuery"];
+                short_id?: components["parameters"]["ShortIdQuery"];
             };
             header?: never;
             path?: never;
@@ -3398,32 +3428,22 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description When truthy (`1`/`t`/`T`), skip the broadcast `ENTER_BOOTLOADER` step
-                 *     and go straight to `CONNECT`. Use this when devices are already in
-                 *     SakuraBoot — typically because they have no valid application
-                 *     installed and the bootloader auto-stays.
+                 * @description Fleet OTA only. When truthy (`1`/`t`/`T`), skip the broadcast
+                 *     `ENTER_BOOTLOADER` step and go straight to discovery. Use when
+                 *     devices are already in SakuraBoot — typically because they have
+                 *     no valid application installed and the bootloader auto-stays.
+                 *     Ignored when `?short_id=` is set (single-device OTA always
+                 *     assumes the target is already in bootloader).
                  */
                 assume_in_bl?: components["parameters"]["AssumeInBlQuery"];
                 /**
-                 * @description When truthy (`1`/`t`/`T`), run the OTA in **emergency / fire-and-forget
-                 *     mode**:
-                 *
-                 *     * No CONNECT, SEND_BLOCK, EOF, or COMPLETE ACK waits.
-                 *     * Each SEND_BLOCK is transmitted 3× back-to-back with extra inter-frame
-                 *       and inter-block pacing.
-                 *     * EOF and COMPLETE are also broadcast 3×; the COMPLETE broadcast resets
-                 *       every receiving device back into the new app.
-                 *     * The session always reports `success` on completion (no ACKs to fail
-                 *       on); the post-OTA discovery snapshot is the authoritative "who came
-                 *       back" signal.
-                 *
-                 *     Use when the bus is too degraded for the normal ACK-driven flow to
-                 *     make progress — e.g. many modules with marginal CAN health where each
-                 *     CONNECT roundtrip drops frames. Slower than the normal path, but it
-                 *     gives every module multiple chances to receive each block without the
-                 *     host bailing on the first missed ACK.
+                 * @description If present, run a **single-device OTA** against this `short_id`
+                 *     instead of a fleet OTA. The target must already be in bootloader
+                 *     mode (the caller is responsible — typically via a prior fleet
+                 *     discovery or by knowing the short_id from the device registry).
+                 *     No `ENTER_BOOTLOADER` broadcast is sent.
                  */
-                emergency?: components["parameters"]["EmergencyQuery"];
+                short_id?: components["parameters"]["ShortIdQuery"];
             };
             header?: never;
             path?: never;

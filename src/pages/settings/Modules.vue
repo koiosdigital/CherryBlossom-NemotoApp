@@ -409,10 +409,9 @@ async function runRecovery() {
 // ---------- bootloader / firmware ----------
 const STATE_LABEL: Record<BootloaderState, string> = {
   idle: 'Idle',
-  arming: 'Waking up modules',
-  connecting: 'Connecting',
+  arming: 'Switching modules to update mode',
+  discovering: 'Finding modules',
   flashing: 'Updating',
-  finalizing: 'Wrapping up',
   rediscover: 'Waiting for restart',
   success: 'Done',
   failed: 'Failed',
@@ -425,9 +424,8 @@ const STATE_VARIANT: Record<
 > = {
   idle: 'outline',
   arming: 'secondary',
-  connecting: 'secondary',
+  discovering: 'secondary',
   flashing: 'default',
-  finalizing: 'default',
   rediscover: 'secondary',
   success: 'success',
   failed: 'destructive',
@@ -437,22 +435,32 @@ const STATE_VARIANT: Record<
 const FAIL_LABEL: Record<BootloaderFailReason, string> = {
   none: '',
   no_bootloaders: 'No modules responded.',
-  block_ack_timeout: 'A module stopped responding part way through.',
-  block_nacked: 'A module rejected the firmware.',
-  eof_failed: "A module didn't confirm the end of the file.",
-  complete_failed: "Couldn't tell modules to restart.",
   invalid_image: "That file doesn't look like valid firmware.",
   aborted_by_user: 'You cancelled the update.',
   internal: 'Something went wrong on the display.',
 }
 
-const progressPct = computed(() => Math.round(bootloader.progress.value * 100))
+// Per-device fail step → friendly text. Used on the device row when the
+// per-device state is `failed`.
+const FAIL_STEP_LABEL: Record<components['schemas']['BootloaderFailStep'], string> = {
+  none: '',
+  connect: "Didn't respond",
+  send_block: 'Stopped responding mid-update',
+  eof: "Didn't confirm end of file",
+  complete: "Couldn't restart",
+}
+
+const deviceProgressPct = computed(() =>
+  Math.round(bootloader.currentDeviceProgress.value * 100)
+)
+const fleetProgressPct = computed(() =>
+  Math.round(bootloader.fleetProgress.value * 100)
+)
 const showSessionCard = computed(() => bootloader.isActive.value)
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const file = ref<File | null>(null)
 const assumeInBl = ref(false)
-const emergency = ref(false)
 function pickFile() { fileInput.value?.click() }
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -469,23 +477,29 @@ const entering = ref(false)
 const aborting = ref(false)
 const confirmFlashOpen = ref(false)
 
+// short_id of a single module to retry. `undefined` = fleet update.
+// The retry button on a failed device row sets this and re-opens the
+// confirm dialog.
+const singleTargetShortId = ref<number | undefined>(undefined)
+
 async function startFlash() {
   if (!file.value) return
   confirmFlashOpen.value = false
   uploading.value = true
+  const isSingle = singleTargetShortId.value !== undefined
   try {
     const res = await bootloader.upload(file.value, {
       assumeInBl: assumeInBl.value,
-      emergency: emergency.value,
+      shortId: singleTargetShortId.value,
     })
     if (!res.ok) {
       toast({ title: 'File rejected', description: res.error, variant: 'destructive' })
       return
     }
     toast({
-      title: emergency.value
-        ? `Emergency-updating to ${res.fw}`
-        : `Updating to ${res.fw}`,
+      title: isSingle
+        ? `Updating module ${singleTargetShortId.value} to ${res.fw}`
+        : `Updating fleet to ${res.fw}`,
       variant: 'success',
     })
   } catch (e) {
@@ -496,7 +510,24 @@ async function startFlash() {
     })
   } finally {
     uploading.value = false
+    singleTargetShortId.value = undefined
   }
+}
+
+// Retry a single failed device. Reuses the most recently selected file
+// — the user picks the bin once, then can retry any failed module
+// without re-picking. If no file is loaded, prompt them to pick one.
+function retryDevice(shortId: number) {
+  if (!file.value) {
+    toast({
+      title: 'Pick a firmware file first',
+      description: 'Use the Update card to choose the .bin, then retry.',
+      variant: 'warn',
+    })
+    return
+  }
+  singleTargetShortId.value = shortId
+  confirmFlashOpen.value = true
 }
 
 async function runProbe() {
@@ -504,9 +535,15 @@ async function runProbe() {
   try {
     const r = await bootloader.probe()
     if (!r) return
+    const n = r.bootloader_count
     toast({
-      title: r.any_in_bootloader ? 'A module is ready to update' : 'No modules ready to update',
-      variant: r.any_in_bootloader ? 'success' : 'warn',
+      title:
+        n === 0
+          ? 'No modules in update mode'
+          : n === 1
+          ? '1 module is ready to update'
+          : `${n} modules are ready to update`,
+      variant: n > 0 ? 'success' : 'warn',
     })
   } catch (e) {
     toast({ title: "Couldn't check", description: friendlyError(e), variant: 'destructive' })
@@ -906,8 +943,39 @@ function uuidParts(u: string) {
                   <span v-else class="text-xs text-muted-foreground">—</span>
                 </td>
                 <td>
+                  <!-- OTA-aware status takes priority while a session is
+                       live: currently-flashing > per-device failed > done -->
                   <Badge
-                    v-if="motionFor(m.status?.state)"
+                    v-if="
+                      bootloader.status.value?.state === 'flashing' &&
+                      bootloader.status.value.current_short_id === m.short_id
+                    "
+                    variant="default"
+                    class="gap-1"
+                  >
+                    <Loader2 class="size-3 animate-spin" />
+                    Updating
+                  </Badge>
+                  <Badge
+                    v-else-if="deviceEntry(m.uuid)?.state === 'failed'"
+                    variant="destructive"
+                    class="gap-1"
+                    :title="
+                      FAIL_STEP_LABEL[deviceEntry(m.uuid)!.fail_step] || 'Failed'
+                    "
+                  >
+                    <AlertTriangle class="size-3" />
+                    Update failed
+                  </Badge>
+                  <Badge
+                    v-else-if="deviceEntry(m.uuid)?.state === 'queued'"
+                    variant="outline"
+                    class="gap-1"
+                  >
+                    Queued
+                  </Badge>
+                  <Badge
+                    v-else-if="motionFor(m.status?.state)"
                     :variant="motionFor(m.status?.state)!.tone"
                     class="gap-1"
                   >
@@ -922,7 +990,7 @@ function uuidParts(u: string) {
                     {{ motionFor(m.status?.state)!.label }}
                   </Badge>
                   <Badge
-                    v-else-if="deviceEntry(m.uuid)?.came_back"
+                    v-else-if="deviceEntry(m.uuid)?.came_back || deviceEntry(m.uuid)?.state === 'done'"
                     variant="success"
                     class="gap-1"
                   >
@@ -949,6 +1017,22 @@ function uuidParts(u: string) {
                 </td>
                 <td>
                   <div class="flex justify-end gap-1">
+                    <!-- Retry button: only when this module's last OTA
+                         attempt failed AND no session is currently
+                         running. Reuses the file already picked. -->
+                    <Button
+                      v-if="
+                        deviceEntry(m.uuid)?.state === 'failed' &&
+                        !bootloader.isActive.value
+                      "
+                      variant="outline"
+                      size="sm"
+                      :disabled="uploading"
+                      @click="retryDevice(m.short_id)"
+                    >
+                      <RefreshCw />
+                      Retry update
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -999,7 +1083,8 @@ function uuidParts(u: string) {
               {{ STATE_LABEL[bootloader.status.value.state] }}
             </CardTitle>
             <CardDescription>
-              Don't power off the display until this finishes.
+              Modules are updated one at a time. Don't power off the display
+              until the whole run finishes.
             </CardDescription>
           </div>
           <Badge :variant="STATE_VARIANT[bootloader.status.value.state]">
@@ -1008,18 +1093,48 @@ function uuidParts(u: string) {
         </div>
       </CardHeader>
       <CardContent class="flex flex-col gap-4">
+        <!-- Fleet progress: devices_done + devices_failed / devices_total -->
         <div
-          v-if="bootloader.status.value.image_blocks > 0"
+          v-if="bootloader.status.value.devices_total > 0"
           class="flex flex-col gap-2"
         >
           <div class="flex items-baseline justify-between text-xs text-muted-foreground">
-            <span>{{ bootloader.status.value.message || 'Working…' }}</span>
-            <span class="num">{{ progressPct }}%</span>
+            <span>
+              {{ bootloader.status.value.devices_done }}
+              of {{ bootloader.status.value.devices_total }} modules updated
+              <template v-if="bootloader.status.value.devices_failed > 0">
+                · {{ bootloader.status.value.devices_failed }} failed
+              </template>
+            </span>
+            <span class="num">{{ fleetProgressPct }}%</span>
           </div>
           <div class="h-2 w-full overflow-hidden rounded-full bg-muted">
             <div
               class="h-full bg-primary transition-[width] duration-200"
-              :style="{ width: `${progressPct}%` }"
+              :style="{ width: `${fleetProgressPct}%` }"
+            />
+          </div>
+        </div>
+
+        <!-- Current-device progress: which short_id, how far through -->
+        <div
+          v-if="
+            bootloader.status.value.state === 'flashing' &&
+            bootloader.status.value.current_short_id > 0
+          "
+          class="flex flex-col gap-2"
+        >
+          <div class="flex items-baseline justify-between text-xs text-muted-foreground">
+            <span>
+              Module {{ bootloader.status.value.current_short_id }}:
+              {{ bootloader.status.value.message || 'updating…' }}
+            </span>
+            <span class="num">{{ deviceProgressPct }}%</span>
+          </div>
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              class="h-full bg-primary/70 transition-[width] duration-200"
+              :style="{ width: `${deviceProgressPct}%` }"
             />
           </div>
         </div>
@@ -1037,10 +1152,10 @@ function uuidParts(u: string) {
             <dd class="num">{{ fmtSize(bootloader.status.value.image_size) }}</dd>
           </div>
           <div class="flex flex-col gap-0.5">
-            <dt class="text-xs text-muted-foreground">Modules updated</dt>
+            <dt class="text-xs text-muted-foreground">Status</dt>
             <dd class="num">
-              {{ bootloader.status.value.post_ota_back }} /
-              {{ bootloader.status.value.pre_ota_assigned }}
+              {{ bootloader.status.value.devices_done }} /
+              {{ bootloader.status.value.devices_total }}
             </dd>
           </div>
         </dl>
@@ -1148,22 +1263,9 @@ function uuidParts(u: string) {
                 </Label>
               </div>
               <p class="ml-10 text-xs text-muted-foreground">
-                Use this if a module is stuck without firmware. Otherwise
-                leave it off.
-              </p>
-            </div>
-            <div class="flex flex-col gap-1">
-              <div class="flex items-center gap-2">
-                <Switch id="emergency" v-model="emergency" />
-                <Label for="emergency" class="cursor-pointer">
-                  Emergency mode (slow, blind)
-                </Label>
-              </div>
-              <p class="ml-10 text-xs text-muted-foreground">
-                Each block is sent three times without waiting for replies,
-                with extra pacing between frames. Much slower, but works
-                when normal updates fail because some modules don't ACK.
-                Use as a last resort.
+                Use this if modules are stuck without firmware and already
+                sitting in the bootloader. Otherwise leave it off — fleet
+                updates broadcast a wake-up step automatically.
               </p>
             </div>
             <div class="flex flex-wrap gap-2">
@@ -1195,7 +1297,10 @@ function uuidParts(u: string) {
         <Dialog v-model:open="confirmFlashOpen">
           <Button
             :disabled="!file || uploading || bootloader.isActive.value"
-            @click="confirmFlashOpen = true"
+            @click="
+              singleTargetShortId = undefined;
+              confirmFlashOpen = true
+            "
           >
             <Loader2 v-if="uploading" class="animate-spin" />
             <Rocket v-else />
@@ -1203,11 +1308,19 @@ function uuidParts(u: string) {
           </Button>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Update every connected module?</DialogTitle>
-              <DialogDescription>
-                The display will go dark for about 30 seconds. Any module that
-                doesn't respond keeps its current firmware — just run the
-                update again to catch them.
+              <DialogTitle v-if="singleTargetShortId !== undefined">
+                Re-update module {{ singleTargetShortId }}?
+              </DialogTitle>
+              <DialogTitle v-else>Update every connected module?</DialogTitle>
+              <DialogDescription v-if="singleTargetShortId !== undefined">
+                That module's display will go dark for ~10 seconds while it's
+                re-flashed. Other modules keep running.
+              </DialogDescription>
+              <DialogDescription v-else>
+                Modules update one at a time. The display will be partially
+                offline for a few minutes. Any module that fails keeps its
+                current firmware — you can retry it individually from the
+                module list.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
