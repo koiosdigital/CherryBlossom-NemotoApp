@@ -64,9 +64,8 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
     }
   })
   ws.on('module.alive', (ev) => patch(ev.data.uuid, (m) => ({ ...m, alive: true })))
-  ws.on('module.dead', (ev) => patch(ev.data.uuid, (m) => ({ ...m, alive: false })))
   ws.on('module.rebooted', (ev) => {
-    // Module just booted — 100 ms detect vs waiting for heartbeat timeout.
+    // Module just booted — 100 ms detect via DEVICE_BOOTED frame.
     // Status and persisted cache are now stale; clear them so consumers
     // don't act on pre-reboot state. Fresh data will arrive via the next
     // module.status and any consumer calling fetchModule().

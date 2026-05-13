@@ -36,6 +36,7 @@ import {
   Radar,
   RefreshCw,
   Rocket,
+  SlidersHorizontal,
   Trash2,
   Undo2,
   Upload,
@@ -49,6 +50,7 @@ import { useBootloader } from '@/composables/useBootloader'
 import { useToast } from '@/composables/useToast'
 import CalibrationModal from './CalibrationModal.vue'
 import ModuleAdvancedModal from '@/components/ModuleAdvancedModal.vue'
+import BusActionsModal from '@/components/BusActionsModal.vue'
 import { friendlyError } from '@/lib/errors'
 import type { components } from '@/api.d'
 
@@ -168,17 +170,19 @@ async function resetBoard() {
 // ---------- identify wave ----------
 const wave = ref(new Map<string, number>())
 const waveRunning = ref(false)
-const letterFlaps = computed(() => flapsState.letters.value)
+// 62 flaps available for placement (everything except A=0 and blank=56),
+// covering up to 62 modules with unique labels in a single pass.
+const placementFlaps = computed(() => flapsState.placement.value)
 
-function glyphForUuid(uuid: string): string | null {
+function flapForUuid(uuid: string) {
   const idx = wave.value.get(uuid)
   if (idx == null) return null
-  return flapsState.byId.value.get(idx)?.glyph ?? null
+  return flapsState.byId.value.get(idx) ?? null
 }
 
 async function runIdentify() {
   if (!unmapped.value.length) return
-  if (!letterFlaps.value.length) {
+  if (!placementFlaps.value.length) {
     toast({
       title: 'Flap catalog unavailable',
       description: 'Try refreshing the page.',
@@ -188,9 +192,9 @@ async function runIdentify() {
   }
   waveRunning.value = true
   try {
-    const batchSize = Math.min(unmapped.value.length, letterFlaps.value.length)
+    const batchSize = Math.min(unmapped.value.length, placementFlaps.value.length)
     const batch = unmapped.value.slice(0, batchSize)
-    const flapIds = letterFlaps.value.slice(0, batchSize).map((f) => f.id)
+    const flapIds = placementFlaps.value.slice(0, batchSize).map((f) => f.id)
     const { data, error: err } = await apiClient.POST(
       '/api/setup/identify_pass',
       { body: { flaps: flapIds, modules: batch.map((m) => m.uuid) } }
@@ -230,15 +234,23 @@ function openPicker(x: number, y: number) {
 }
 
 const pickerCandidates = computed(() => {
-  type C = { uuid: string; shortId: number; letter: string | null; sortKey: string; alive: boolean }
+  type C = {
+    uuid: string
+    shortId: number
+    flap: ReturnType<typeof flapForUuid>
+    sortKey: string
+    alive: boolean
+  }
   const out: C[] = []
   for (const m of unmapped.value) {
-    const letter = glyphForUuid(m.uuid)
+    const f = flapForUuid(m.uuid)
     out.push({
       uuid: m.uuid,
       shortId: m.short_id,
-      letter,
-      sortKey: letter ?? `~${m.uuid}`,
+      flap: f,
+      // Sort by flap id when identified (same order the wave fired) so the
+      // list matches the visual order on the wall, then unidentified by uuid.
+      sortKey: f ? String(f.id).padStart(3, '0') : `~${m.uuid}`,
       alive: m.alive,
     })
   }
@@ -280,6 +292,63 @@ async function removeAt(x: number, y: number) {
   }
 }
 
+// ---------- drag-and-drop move/swap ----------
+// HTML5 DnD: drag a placed cell, drop on another cell. Empty target → move,
+// placed target → swap. Source coords flow via dataTransfer to survive the
+// drop without leaning on a parent ref.
+const dragSource = ref<{ x: number; y: number } | null>(null)
+const dragOver = ref<{ x: number; y: number } | null>(null)
+
+function onDragStart(e: DragEvent, x: number, y: number) {
+  dragSource.value = { x, y }
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', `${x},${y}`)
+  }
+}
+
+function onDragEnd() {
+  dragSource.value = null
+  dragOver.value = null
+}
+
+function onDragOver(e: DragEvent, x: number, y: number) {
+  if (!dragSource.value) return
+  if (dragSource.value.x === x && dragSource.value.y === y) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dragOver.value = { x, y }
+}
+
+function onDragLeave(x: number, y: number) {
+  if (dragOver.value?.x === x && dragOver.value?.y === y) {
+    dragOver.value = null
+  }
+}
+
+async function onDrop(e: DragEvent, x: number, y: number) {
+  e.preventDefault()
+  const src = dragSource.value
+  dragSource.value = null
+  dragOver.value = null
+  if (!src) return
+  if (src.x === x && src.y === y) return
+  const targetHasModule = !!moduleAt(x, y)
+  try {
+    if (targetHasModule) {
+      await gridState.swapCell(src, { x, y })
+    } else {
+      await gridState.moveCell(src, { x, y })
+    }
+  } catch (err) {
+    toast({
+      title: targetHasModule ? "Couldn't swap" : "Couldn't move",
+      description: friendlyError(err),
+      variant: 'destructive',
+    })
+  }
+}
+
 // ---------- calibration modal ----------
 const calibrationUuid = ref<string | null>(null)
 const calibrationOpen = ref(false)
@@ -295,6 +364,9 @@ function openAdvanced(uuid: string) {
   advancedUuid.value = uuid
   advancedOpen.value = true
 }
+
+// ---------- bus actions modal ----------
+const busActionsOpen = ref(false)
 
 // ---------- bus-wide recovery actions ----------
 const homingAll = ref(false)
@@ -380,6 +452,7 @@ const showSessionCard = computed(() => bootloader.isActive.value)
 const fileInput = ref<HTMLInputElement | null>(null)
 const file = ref<File | null>(null)
 const assumeInBl = ref(false)
+const emergency = ref(false)
 function pickFile() { fileInput.value?.click() }
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -401,12 +474,20 @@ async function startFlash() {
   confirmFlashOpen.value = false
   uploading.value = true
   try {
-    const res = await bootloader.upload(file.value, { assumeInBl: assumeInBl.value })
+    const res = await bootloader.upload(file.value, {
+      assumeInBl: assumeInBl.value,
+      emergency: emergency.value,
+    })
     if (!res.ok) {
       toast({ title: 'File rejected', description: res.error, variant: 'destructive' })
       return
     }
-    toast({ title: `Updating to ${res.fw}`, variant: 'success' })
+    toast({
+      title: emergency.value
+        ? `Emergency-updating to ${res.fw}`
+        : `Updating to ${res.fw}`,
+      variant: 'success',
+    })
   } catch (e) {
     toast({
       title: "Couldn't start update",
@@ -523,6 +604,10 @@ function uuidParts(u: string) {
             <Loader2 v-if="stoppingAll" class="animate-spin" />
             <OctagonAlert v-else />
             Stop
+          </Button>
+          <Button variant="outline" size="sm" @click="busActionsOpen = true">
+            <SlidersHorizontal />
+            Bus controls
           </Button>
           <Button variant="ghost" size="sm" @click="refreshAll">
             <RefreshCw />
@@ -656,15 +741,27 @@ function uuidParts(u: string) {
                 <button
                   v-if="moduleAt(x - 1, y - 1)"
                   type="button"
-                  :title="`(${x - 1}, ${y - 1}) · ${moduleAt(x - 1, y - 1)!.uuid}`"
-                  class="relative flex flex-col items-center justify-between gap-1 rounded-sm border border-border bg-muted/40 p-1.5 transition-colors hover:border-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  :class="
+                  draggable="true"
+                  :title="`(${x - 1}, ${y - 1}) · ${moduleAt(x - 1, y - 1)!.uuid} — drag to move or swap`"
+                  class="relative flex cursor-grab flex-col items-center justify-between gap-1 rounded-sm border border-border bg-muted/40 p-1.5 transition-colors hover:border-primary hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
+                  :class="[
                     moduleAt(x - 1, y - 1)?.info &&
                     !moduleAt(x - 1, y - 1)?.info?.calibrated
                       ? 'border-amber-500/60'
-                      : ''
-                  "
+                      : '',
+                    dragOver && dragOver.x === x - 1 && dragOver.y === y - 1
+                      ? 'ring-2 ring-primary'
+                      : '',
+                    dragSource && dragSource.x === x - 1 && dragSource.y === y - 1
+                      ? 'opacity-50'
+                      : '',
+                  ]"
                   @click="openCalibration(moduleAt(x - 1, y - 1)!.uuid)"
+                  @dragstart="onDragStart($event, x - 1, y - 1)"
+                  @dragend="onDragEnd"
+                  @dragover="onDragOver($event, x - 1, y - 1)"
+                  @dragleave="onDragLeave(x - 1, y - 1)"
+                  @drop="onDrop($event, x - 1, y - 1)"
                 >
                   <span
                     class="status-dot size-1.5!"
@@ -705,7 +802,15 @@ function uuidParts(u: string) {
                   type="button"
                   :title="`(${x - 1}, ${y - 1})`"
                   class="rounded-sm border border-dashed border-border/50 text-xs text-muted-foreground/60 transition-colors hover:border-primary hover:bg-primary/10 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  :class="
+                    dragOver && dragOver.x === x - 1 && dragOver.y === y - 1
+                      ? 'border-primary bg-primary/15 text-primary'
+                      : ''
+                  "
                   @click="openPicker(x - 1, y - 1)"
+                  @dragover="onDragOver($event, x - 1, y - 1)"
+                  @dragleave="onDragLeave(x - 1, y - 1)"
+                  @drop="onDrop($event, x - 1, y - 1)"
                 >
                   +
                 </button>
@@ -1047,6 +1152,20 @@ function uuidParts(u: string) {
                 leave it off.
               </p>
             </div>
+            <div class="flex flex-col gap-1">
+              <div class="flex items-center gap-2">
+                <Switch id="emergency" v-model="emergency" />
+                <Label for="emergency" class="cursor-pointer">
+                  Emergency mode (slow, blind)
+                </Label>
+              </div>
+              <p class="ml-10 text-xs text-muted-foreground">
+                Each block is sent three times without waiting for replies,
+                with extra pacing between frames. Much slower, but works
+                when normal updates fail because some modules don't ACK.
+                Use as a last resort.
+              </p>
+            </div>
             <div class="flex flex-wrap gap-2">
               <Button
                 variant="outline"
@@ -1132,10 +1251,17 @@ function uuidParts(u: string) {
             @click="assign(c.uuid)"
           >
             <span
-              v-if="c.letter"
+              v-if="c.flap?.color"
+              class="inline-flex size-10 shrink-0 items-center justify-center rounded-sm border border-border"
+              :style="{ background: c.flap.color }"
+              :title="c.flap.label"
+            />
+            <span
+              v-else-if="c.flap?.glyph"
               class="inline-flex size-10 shrink-0 items-center justify-center rounded-sm bg-primary font-mono text-base font-bold text-primary-foreground"
+              :title="c.flap.label"
             >
-              {{ c.letter }}
+              {{ c.flap.glyph }}
             </span>
             <span
               v-else
@@ -1185,6 +1311,8 @@ function uuidParts(u: string) {
       v-model:open="advancedOpen"
       :uuid="advancedUuid"
     />
+
+    <BusActionsModal v-model:open="busActionsOpen" />
 
     <!-- Recovery confirm -->
     <Dialog v-model:open="recoveryConfirmOpen">

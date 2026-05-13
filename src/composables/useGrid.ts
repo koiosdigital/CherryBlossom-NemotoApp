@@ -102,6 +102,59 @@ export function useGrid() {
     )
   }
 
+  async function moveCell(
+    from: { x: number; y: number },
+    to: { x: number; y: number }
+  ) {
+    return commit(
+      (g) => {
+        const moved = g.mapping.find(
+          (m) => m.x === from.x && m.y === from.y
+        )
+        if (!moved) return g
+        return {
+          ...g,
+          mapping: [
+            ...g.mapping.filter(
+              (m) => !(m.x === from.x && m.y === from.y) && !(m.x === to.x && m.y === to.y)
+            ),
+            { ...moved, x: to.x, y: to.y },
+          ],
+        }
+      },
+      async () => {
+        const { error: err } = await apiClient.POST('/api/grid/cell/move', {
+          body: { from, to },
+        })
+        if (err) throw err
+      }
+    )
+  }
+
+  async function swapCell(
+    a: { x: number; y: number },
+    b: { x: number; y: number }
+  ) {
+    return commit(
+      (g) => {
+        const ma = g.mapping.find((m) => m.x === a.x && m.y === a.y)
+        const mb = g.mapping.find((m) => m.x === b.x && m.y === b.y)
+        const next = g.mapping.filter(
+          (m) => !(m.x === a.x && m.y === a.y) && !(m.x === b.x && m.y === b.y)
+        )
+        if (ma) next.push({ ...ma, x: b.x, y: b.y })
+        if (mb) next.push({ ...mb, x: a.x, y: a.y })
+        return { ...g, mapping: next }
+      },
+      async () => {
+        const { error: err } = await apiClient.POST('/api/grid/cell/swap', {
+          body: { a, b },
+        })
+        if (err) throw err
+      }
+    )
+  }
+
   async function removeCell(x: number, y: number) {
     return commit(
       (g) => ({
@@ -134,6 +187,8 @@ export function useGrid() {
     refresh: () => load(true),
     setSize,
     assignCell,
+    moveCell,
+    swapCell,
     removeCell,
     resetBoard,
   }

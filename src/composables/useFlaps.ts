@@ -44,6 +44,15 @@ export function useFlaps() {
     flaps.value.filter((f) => f.type === 'letter')
   )
 
+  // Flaps usable as identify-pass labels for the placement flow. Excludes:
+  //   * 0 ("A") — the home position; modules show A right after homing, so
+  //     using A as an identifier is ambiguous.
+  //   * 56 ("blank") — invisible on the wall, can't be used to disambiguate.
+  // Result: 62 unique labels — enough for any realistic module count.
+  const placement = computed(() =>
+    flaps.value.filter((f) => f.id !== 0 && f.id !== 56)
+  )
+
   const byGlyph = computed(() => {
     const m = new Map<string, number>()
     for (const f of flaps.value) {
@@ -59,6 +68,7 @@ export function useFlaps() {
     byId,
     byGlyph,
     letters,
+    placement,
     refresh: () => load(true),
   }
 }

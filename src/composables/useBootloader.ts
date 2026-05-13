@@ -86,9 +86,12 @@ export function useBootloader() {
 
   async function upload(
     file: File | Blob,
-    opts?: { assumeInBl?: boolean }
+    opts?: { assumeInBl?: boolean; emergency?: boolean }
   ): Promise<UploadResponse> {
-    const qs = opts?.assumeInBl ? '?assume_in_bl=1' : ''
+    const params = new URLSearchParams()
+    if (opts?.assumeInBl) params.set('assume_in_bl', '1')
+    if (opts?.emergency) params.set('emergency', '1')
+    const qs = params.toString() ? `?${params}` : ''
     const res = await fetch(`${API_BASE}/api/bootloader/upload${qs}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },

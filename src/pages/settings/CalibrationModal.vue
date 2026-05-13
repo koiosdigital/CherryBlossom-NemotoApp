@@ -52,8 +52,8 @@ watch(
   }
 )
 
-// If our module reboots mid-flow, bail. Detection is ~100ms via module.rebooted
-// instead of 60s of heartbeat timeout, so we can fail fast with a clear toast.
+// If our module reboots mid-flow, bail. Detected ~100ms via module.rebooted
+// (DEVICE_BOOTED frame) so we can fail fast with a clear toast.
 ws.on('module.rebooted', (ev) => {
   if (!props.open || ev.data.uuid !== props.uuid) return
   if (state.value === 'idle') return
@@ -66,7 +66,7 @@ ws.on('module.rebooted', (ev) => {
   })
 })
 
-function waitForHomed(target: boolean, timeoutMs = 20000) {
+function waitForHomed(target: boolean, timeoutMs = 60000) {
   return new Promise<void>((resolve, reject) => {
     if (status.value?.homed === target) return resolve()
     const timer = setTimeout(() => {

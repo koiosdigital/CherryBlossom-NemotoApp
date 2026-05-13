@@ -705,6 +705,11 @@ export interface paths {
          *     * **Devices that don't reboot:** `rediscover` waits 8 s for
          *       `DEVICE_BOOTED` events; `devices[].came_back=false` flags any
          *       UUIDs that didn't return.
+         *     * **Bus too degraded for ACK roundtrips:** pass `?emergency=1` to run
+         *       fire-and-forget — no CONNECT/SEND_BLOCK/EOF/COMPLETE ACK waits,
+         *       every block transmitted 3× back-to-back with extra pacing. Always
+         *       ends in `success`; rely on the post-OTA discovery snapshot to see
+         *       which modules actually came back.
          */
         post: operations["uploadBootloader"];
         delete?: never;
@@ -1044,7 +1049,7 @@ export interface components {
             /** @description 0x10 = Sakura split-flap module. */
             hw_type: number;
             assigned: boolean;
-            /** @description At least one heartbeat received. */
+            /** @description At least one unsolicited app frame (STATE_CHANGED or DEVICE_BOOTED) received. Once true */
             alive: boolean;
             /** @description Current grid position, or null if unmapped. */
             grid: components["schemas"]["GridCoord"] | null;
@@ -1128,7 +1133,7 @@ export interface components {
             persisted: components["schemas"]["PersistedConfig"] | null;
         };
         /** @description POST body for `/api/modules/{uuid}`. Discriminated union on `action`. */
-        ModuleActionRequest: components["schemas"]["ActionHome"] | components["schemas"]["ActionCalibrate"] | components["schemas"]["ActionDisplayFlap"] | components["schemas"]["ActionQueueDisplayFlap"] | components["schemas"]["ActionQueueStepTo"] | components["schemas"]["ActionSetQueueDelay"] | components["schemas"]["ActionIdentify"] | components["schemas"]["ActionSetSpeed"] | components["schemas"]["ActionSetAccel"] | components["schemas"]["ActionSetTransition"] | components["schemas"]["ActionSetStepsPerFlap"] | components["schemas"]["ActionReset"];
+        ModuleActionRequest: components["schemas"]["ActionHome"] | components["schemas"]["ActionCalibrate"] | components["schemas"]["ActionDisplayFlap"] | components["schemas"]["ActionQueueDisplayFlap"] | components["schemas"]["ActionQueueStepTo"] | components["schemas"]["ActionSetQueueDelay"] | components["schemas"]["ActionIdentify"] | components["schemas"]["ActionSetSpeed"] | components["schemas"]["ActionSetAccel"] | components["schemas"]["ActionSetTransition"] | components["schemas"]["ActionSetStepsPerFlap"] | components["schemas"]["ActionReset"] | components["schemas"]["ActionTestStop"];
         ActionHome: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -1241,6 +1246,33 @@ export interface components {
              */
             action: "reset";
         };
+        /**
+         * @description **Diagnostic only.** Asks the module to enter STM32 STOP mode for
+         *     `param` ms (clamped device-side to [10..500]) and report timing +
+         *     wake source. The host waits up to ~1.5 s for the response so the
+         *     device's IWDG has a chance to fire and the host can observe a
+         *     boot event if STOP entry hangs.
+         *
+         *     The response echo carries:
+         *     * `requested_ms` — duration the device actually used after clamping
+         *     * `measured_ms` — RTC-measured elapsed time across the STOP cycle
+         *     * `wake_source` — numeric code (0=alarm, 1=can_rx, 2=home, 0xFE=other)
+         *     * `wake` — string alias for `wake_source`
+         *
+         *     If `measured_ms` differs sharply from `requested_ms` the device's
+         *     RTC probably doesn't tick during STOP on this silicon — a different
+         *     scheduled-wake mechanism would be needed before STOP can be wired
+         *     into the idle path.
+         */
+        ActionTestStop: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            action: "test_stop";
+            /** @description STOP duration in ms. Device clamps to [10..500]. */
+            param: number;
+        };
         ModuleActionResponse: {
             /** @constant */
             ok: true;
@@ -1250,7 +1282,7 @@ export interface components {
             [key: string]: unknown;
         };
         /** @description POST body for `/api/modules`. Discriminated union on `action`. */
-        BroadcastActionRequest: components["schemas"]["BcEmergencyStop"] | components["schemas"]["BcResetAll"] | components["schemas"]["BcRunQueued"] | components["schemas"]["BcHomeAll"] | components["schemas"]["BcDisplayAll"] | components["schemas"]["BcSetSpeedAll"] | components["schemas"]["BcSetTransitionAll"] | components["schemas"]["BcSetWaveDelay"] | components["schemas"]["BcSetAccelAll"] | components["schemas"]["BcSetStepsPerFlapAll"];
+        BroadcastActionRequest: components["schemas"]["BcEmergencyStop"] | components["schemas"]["BcResetAll"] | components["schemas"]["BcRunQueued"] | components["schemas"]["BcHomeAll"] | components["schemas"]["BcDisplayAll"] | components["schemas"]["BcSetSpeedAll"] | components["schemas"]["BcSetTransitionAll"] | components["schemas"]["BcSetWaveDelay"] | components["schemas"]["BcSetQueueDelayAll"] | components["schemas"]["BcSetAccelAll"] | components["schemas"]["BcSetStepsPerFlapAll"] | components["schemas"]["BcIdentifyAll"];
         BcEmergencyStop: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -1327,6 +1359,36 @@ export interface components {
              */
             action: "set_steps_per_flap_all";
             param: number;
+        };
+        /**
+         * @description Set the SAME `queue_delay` on every assigned module. Use this when
+         *     you want every module to start its queued move at exactly the same
+         *     offset after `run_queued`. For staggered/wave effects use
+         *     `set_wave_delay` instead.
+         */
+        BcSetQueueDelayAll: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            action: "set_queue_delay_all";
+            /** @description Delay (ms) between `run_queued` and move start. */
+            param: number;
+        };
+        /**
+         * @description Blink the LED on every assigned module for `param` seconds (default
+         *     3 if `param` is omitted). `param: 0` cancels an in-progress identify
+         *     on every module. Useful for "where is the array" maintenance and
+         *     verifying the bus is healthy end-to-end.
+         */
+        BcIdentifyAll: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            action: "identify_all";
+            /** @description Blink duration (s). Defaults to 3 when omitted. */
+            param?: number;
         };
         BroadcastActionResponse: {
             /** @constant */
@@ -1627,6 +1689,13 @@ export interface components {
         BootloaderStatus: {
             state: components["schemas"]["BootloaderState"];
             fail_reason: components["schemas"]["BootloaderFailReason"];
+            /**
+             * @description True if this session was started with `?emergency=1`. In
+             *     emergency mode `blocks_acked` tracks `blocks_sent` because
+             *     we never wait for ACKs; treat the post-OTA `devices[].came_back`
+             *     field as the authoritative "did it work" signal.
+             */
+            emergency: boolean;
             /** @description Total uploaded image bytes (incl. 1 KB metadata page). */
             image_size: number;
             /** @description Number of 64-byte blocks in the image. */
@@ -1676,6 +1745,8 @@ export interface components {
             /** @constant */
             ok: true;
             state: components["schemas"]["BootloaderState"];
+            /** @description Echoes the `?emergency=1` query flag for this session. */
+            emergency: boolean;
             image_size: number;
             image_blocks: number;
             fw: string;
@@ -1716,7 +1787,7 @@ export interface components {
             ts: number;
         };
         /** @description All server-to-client frames on `/api/ws`. Discriminated on `type`. */
-        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleDead"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventBootloaderStateChanged"] | components["schemas"]["WsEventBootloaderProgress"] | components["schemas"]["WsEventPong"];
+        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventBootloaderStateChanged"] | components["schemas"]["WsEventBootloaderProgress"] | components["schemas"]["WsEventPong"];
         /**
          * @description Sent once to a client right after the WebSocket handshake completes.
          *     Gives the frontend a full initial snapshot so it doesn't need to
@@ -1768,27 +1839,12 @@ export interface components {
              */
             type: "module.alive";
         };
-        WsEventModuleDead: components["schemas"]["WsEnvelopeBase"] & {
-            /** @constant */
-            type: "module.dead";
-            data: {
-                uuid: components["schemas"]["Uuid"];
-                short_id: components["schemas"]["ShortId"];
-            };
-        } & {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "module.dead";
-        };
         /**
          * @description Fires when a module sends the unsolicited DEVICE_BOOTED frame
-         *     (CAN 0x23) right after CAN init on power-up or reset. Detected in
-         *     ~100 ms instead of waiting for the heartbeat-timeout reassign loop.
-         *     Side effects on receipt: the host's status cache is invalidated and
-         *     the per-module Display setting cache is cleared so the next frame
-         *     re-pushes cycle_type / queue_delay.
+         *     (CAN 0x23) right after CAN init on power-up or reset, detected in
+         *     ~100 ms. Side effects on receipt: the host's status cache is
+         *     invalidated and the per-module Display setting cache is cleared
+         *     so the next frame re-pushes cycle_type / queue_delay.
          */
         WsEventModuleRebooted: components["schemas"]["WsEnvelopeBase"] & {
             /** @constant */
@@ -1824,16 +1880,13 @@ export interface components {
          *       transition (CAN `0x22 STATE_CHANGED` from the module).
          *     * The same event also fires on every homed transition (e.g. when a
          *       home seek completes successfully).
-         *     * Heartbeats (CAN `0x00`, every 10 s) refresh the cache; if the
-         *       host had drifted out of sync (e.g. missed a STATE_CHANGED) this
-         *       fires on the next heartbeat — otherwise it's silent.
          *     * Flap changes alone do NOT trigger this event. With 132 modules
          *       stepping through a frame this would emit thousands of events;
          *       consumers should infer the in-flight flap from `state == "cruise"`
          *       and read the resting flap from the next event.
          *
-         *     The host no longer polls modules continuously — a one-shot seed poll
-         *     runs for any module that hasn't sent a heartbeat yet, and that's it.
+         *     The host runs a one-shot seed poll per module to prime the cache;
+         *     after that the cache is updated entirely from STATE_CHANGED events.
          */
         WsEventModuleStatus: components["schemas"]["WsEnvelopeBase"] & {
             /** @constant */
@@ -2138,6 +2191,26 @@ export interface components {
          *     installed and the bootloader auto-stays.
          */
         AssumeInBlQuery: "0" | "1" | "t" | "T" | "true" | "false";
+        /**
+         * @description When truthy (`1`/`t`/`T`), run the OTA in **emergency / fire-and-forget
+         *     mode**:
+         *
+         *     * No CONNECT, SEND_BLOCK, EOF, or COMPLETE ACK waits.
+         *     * Each SEND_BLOCK is transmitted 3× back-to-back with extra inter-frame
+         *       and inter-block pacing.
+         *     * EOF and COMPLETE are also broadcast 3×; the COMPLETE broadcast resets
+         *       every receiving device back into the new app.
+         *     * The session always reports `success` on completion (no ACKs to fail
+         *       on); the post-OTA discovery snapshot is the authoritative "who came
+         *       back" signal.
+         *
+         *     Use when the bus is too degraded for the normal ACK-driven flow to
+         *     make progress — e.g. many modules with marginal CAN health where each
+         *     CONNECT roundtrip drops frames. Slower than the normal path, but it
+         *     gives every module multiple chances to receive each block without the
+         *     host bailing on the first missed ACK.
+         */
+        EmergencyQuery: "0" | "1" | "t" | "T" | "true" | "false";
     };
     requestBodies: never;
     headers: never;
@@ -3246,6 +3319,26 @@ export interface operations {
                  *     installed and the bootloader auto-stays.
                  */
                 assume_in_bl?: components["parameters"]["AssumeInBlQuery"];
+                /**
+                 * @description When truthy (`1`/`t`/`T`), run the OTA in **emergency / fire-and-forget
+                 *     mode**:
+                 *
+                 *     * No CONNECT, SEND_BLOCK, EOF, or COMPLETE ACK waits.
+                 *     * Each SEND_BLOCK is transmitted 3× back-to-back with extra inter-frame
+                 *       and inter-block pacing.
+                 *     * EOF and COMPLETE are also broadcast 3×; the COMPLETE broadcast resets
+                 *       every receiving device back into the new app.
+                 *     * The session always reports `success` on completion (no ACKs to fail
+                 *       on); the post-OTA discovery snapshot is the authoritative "who came
+                 *       back" signal.
+                 *
+                 *     Use when the bus is too degraded for the normal ACK-driven flow to
+                 *     make progress — e.g. many modules with marginal CAN health where each
+                 *     CONNECT roundtrip drops frames. Slower than the normal path, but it
+                 *     gives every module multiple chances to receive each block without the
+                 *     host bailing on the first missed ACK.
+                 */
+                emergency?: components["parameters"]["EmergencyQuery"];
             };
             header?: never;
             path?: never;
@@ -3311,6 +3404,26 @@ export interface operations {
                  *     installed and the bootloader auto-stays.
                  */
                 assume_in_bl?: components["parameters"]["AssumeInBlQuery"];
+                /**
+                 * @description When truthy (`1`/`t`/`T`), run the OTA in **emergency / fire-and-forget
+                 *     mode**:
+                 *
+                 *     * No CONNECT, SEND_BLOCK, EOF, or COMPLETE ACK waits.
+                 *     * Each SEND_BLOCK is transmitted 3× back-to-back with extra inter-frame
+                 *       and inter-block pacing.
+                 *     * EOF and COMPLETE are also broadcast 3×; the COMPLETE broadcast resets
+                 *       every receiving device back into the new app.
+                 *     * The session always reports `success` on completion (no ACKs to fail
+                 *       on); the post-OTA discovery snapshot is the authoritative "who came
+                 *       back" signal.
+                 *
+                 *     Use when the bus is too degraded for the normal ACK-driven flow to
+                 *     make progress — e.g. many modules with marginal CAN health where each
+                 *     CONNECT roundtrip drops frames. Slower than the normal path, but it
+                 *     gives every module multiple chances to receive each block without the
+                 *     host bailing on the first missed ACK.
+                 */
+                emergency?: components["parameters"]["EmergencyQuery"];
             };
             header?: never;
             path?: never;
