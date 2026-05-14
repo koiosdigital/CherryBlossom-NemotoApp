@@ -25,7 +25,6 @@ import {
   Pencil,
   Play,
   Sparkles,
-  Zap,
 } from 'lucide-vue-next'
 import DisplayCell from '@/components/DisplayCell.vue'
 import { apiClient } from '@/api'
@@ -34,7 +33,6 @@ import { useDisplay } from '@/composables/useDisplay'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { useGrid } from '@/composables/useGrid'
 import { useFlaps } from '@/composables/useFlaps'
-import { useModules } from '@/composables/useModules'
 import { useToast } from '@/composables/useToast'
 import { friendlyError } from '@/lib/errors'
 
@@ -44,7 +42,6 @@ const display = useDisplay()
 const displaySettings = useDisplaySettings()
 const gridState = useGrid()
 const flaps = useFlaps()
-const modules = useModules()
 const { toast } = useToast()
 
 // ---------- display settings (effect, delay, cycle_type) ----------
@@ -167,13 +164,6 @@ async function runPreset(p: PresetMeta) {
   }
 }
 
-// ---------- (placeholder) summary sections ----------
-const activity = [
-  { t: '14:22', text: 'Preset "ARRIVALS" activated', kind: 'info' },
-  { t: '14:21', text: 'Schedule "Morning" ran', kind: 'info' },
-  { t: '13:58', text: 'Module M-05 high temperature', kind: 'warn' },
-  { t: '13:45', text: 'NTP sync completed', kind: 'ok' },
-]
 </script>
 
 <template>
@@ -297,83 +287,6 @@ const activity = [
             Full rotation
           </Label>
         </div>
-      </CardContent>
-    </Card>
-
-    <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <Card>
-        <CardContent class="flex flex-col gap-2 py-5">
-          <span class="text-sm text-muted-foreground">Modules online</span>
-          <div class="flex items-baseline gap-2">
-            <span class="display-face text-2xl font-semibold num">
-              {{ modules.modules.value.filter((m) => m.alive).length }}
-            </span>
-            <span class="text-xs text-muted-foreground num">
-              / {{ modules.modules.value.length }}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardContent class="flex flex-col gap-2 py-5">
-          <span class="text-sm text-muted-foreground">Grid size</span>
-          <div class="flex items-baseline gap-2">
-            <span class="display-face text-2xl font-semibold num">
-              {{ gridSize.width }} × {{ gridSize.height }}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardContent class="flex flex-col gap-2 py-5">
-          <span class="text-sm text-muted-foreground">Mapped cells</span>
-          <div class="flex items-baseline gap-2">
-            <span class="display-face text-2xl font-semibold num">
-              {{ gridState.grid.value?.mapping.length ?? 0 }}
-            </span>
-            <span class="text-xs text-muted-foreground num">
-              / {{ gridSize.width * gridSize.height }}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardContent class="flex flex-col gap-2 py-5">
-          <span class="text-sm text-muted-foreground">Flaps</span>
-          <div class="flex items-baseline gap-2">
-            <span class="display-face text-2xl font-semibold num">
-              {{ flaps.flaps.value.length }}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-
-    <Card>
-      <CardContent class="py-4">
-        <h2 class="text-sm font-medium">Recent activity</h2>
-        <ol class="mt-3 flex flex-col gap-3">
-          <li
-            v-for="(a, i) in activity"
-            :key="i"
-            class="flex items-start gap-3 text-sm"
-          >
-            <span class="num mt-0.5 w-10 text-xs text-muted-foreground">
-              {{ a.t }}
-            </span>
-            <Zap
-              class="mt-0.5 size-3.5 shrink-0"
-              :class="
-                a.kind === 'warn'
-                  ? 'text-amber-500'
-                  : a.kind === 'ok'
-                    ? 'text-emerald-500'
-                    : 'text-muted-foreground'
-              "
-            />
-            <span>{{ a.text }}</span>
-          </li>
-        </ol>
       </CardContent>
     </Card>
 
