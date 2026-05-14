@@ -30,10 +30,9 @@ async function load(force = false) {
 function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
-  ws.on('welcome', (ev) => {
-    grid.value = ev.data.grid
-    loaded = true
-  })
+  // Welcome no longer carries grid — REST-fetched via load() on mount, and
+  // again on reconnect so post-outage mutations land in our cache.
+  ws.onReconnect(() => { load(true) })
   ws.on('grid.changed', (ev) => {
     grid.value = ev.data
   })

@@ -47,10 +47,13 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
 
-  ws.on('welcome', (ev) => {
-    modules.value = ev.data.modules.map((m) => ({ ...m }))
-    loaded = true
-  })
+  // Welcome no longer carries the modules array — the device used to ship
+  // the full list (~30 KB transient cJSON for 150 modules) in welcome but
+  // we already REST-fetch via load() on mount, and again via onReconnect
+  // below if the socket drops. Stripping that duplication was the single
+  // biggest heap-pressure fix on the firmware side.
+  ws.onReconnect(() => { load(true) })
+
   ws.on('module.discovered', (ev) => {
     const { uuid, short_id, hw_type } = ev.data
     const exists = modules.value.find((m) => m.uuid === uuid)

@@ -19,6 +19,13 @@ let backoff = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let visibilityWired = false
 
+function dispatch(ev: WsEvent) {
+  const bucket = handlers.get(ev.type)
+  if (bucket) bucket.forEach((h) => h(ev))
+  const star = handlers.get('*')
+  if (star) star.forEach((h) => h(ev))
+}
+
 // Shared connection status. `everConnected` flips true on first successful
 // open and never resets — so consumers can distinguish "still handshaking" from
 // "we lost the connection".
@@ -47,16 +54,27 @@ function connect() {
     }
   }
   socket.onmessage = (msg) => {
-    let ev: WsEvent
+    let raw: unknown
     try {
-      ev = JSON.parse(msg.data) as WsEvent
+      raw = JSON.parse(msg.data)
     } catch {
       return
     }
-    const bucket = handlers.get(ev.type)
-    if (bucket) bucket.forEach((h) => h(ev))
-    const star = handlers.get('*')
-    if (star) star.forEach((h) => h(ev))
+    // The device coalesces broadcasts in a 100ms window and emits them as
+    // one `batch` envelope with an `events` array. Unfold here so downstream
+    // handlers stay event-type-specific — they don't need to know batching
+    // exists. The outer batch's `ts` is propagated onto each inner event so
+    // they remain shape-compatible with non-batched envelopes (e.g. welcome,
+    // pong).
+    const envelope = raw as { type?: string; ts?: number; events?: Array<{ type: string; data?: unknown }> }
+    if (envelope && envelope.type === 'batch' && Array.isArray(envelope.events)) {
+      const ts = envelope.ts ?? 0
+      for (const inner of envelope.events) {
+        dispatch({ ...inner, ts } as WsEvent)
+      }
+      return
+    }
+    dispatch(raw as WsEvent)
   }
   socket.onclose = () => {
     socket = null

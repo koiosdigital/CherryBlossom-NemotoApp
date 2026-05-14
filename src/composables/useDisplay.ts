@@ -32,10 +32,9 @@ async function load(force = false) {
 function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
-  ws.on('welcome', (ev) => {
-    lastFrame.value = ev.data.display
-    loaded = true
-  })
+  // Welcome no longer carries display — REST-fetched via load() on mount,
+  // and again on reconnect.
+  ws.onReconnect(() => { load(true) })
   ws.on('display.frame_sent', (ev) => {
     lastFrame.value = ev.data
   })

@@ -43,10 +43,9 @@ async function loadEffects() {
 function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
-  ws.on('welcome', (ev) => {
-    settings.value = ev.data.settings
-    loaded = true
-  })
+  // Welcome no longer carries settings — REST-fetched via load() on mount,
+  // and again on reconnect.
+  ws.onReconnect(() => { load(true) })
   ws.on('display.settings_changed', (ev) => {
     settings.value = ev.data
   })

@@ -103,9 +103,15 @@ async function startCalibration() {
   const uuid = props.uuid
   errorText.value = null
   try {
-    state.value = 'homing'
-    await homeAndWait(uuid)
-
+    // Already homed and idle? Skip the home cycle and jump straight in —
+    // the device is in a known-good state and homing again just makes the
+    // user wait through an unnecessary seek.
+    const alreadyHomed =
+      status.value?.homed === true && status.value?.state === 'idle'
+    if (!alreadyHomed) {
+      state.value = 'homing'
+      await homeAndWait(uuid)
+    }
     await modules.action(uuid, { action: 'calibrate', param: { step: 'start' } })
     state.value = 'calibrating'
   } catch (e) {

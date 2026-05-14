@@ -1829,22 +1829,71 @@ export interface components {
              */
             ts: number;
         };
-        /** @description All server-to-client frames on `/api/ws`. Discriminated on `type`. */
-        WsEvent: components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventBootloaderStateChanged"] | components["schemas"]["WsEventBootloaderProgress"] | components["schemas"]["WsEventPong"];
+        /**
+         * @description All server-to-client frames on `/api/ws`. Discriminated on `type`.
+         *
+         *     Note: most steady-state broadcasts arrive wrapped in a `batch`
+         *     envelope (see WsEventBatch) — the device coalesces publish calls
+         *     over a 100ms window. Frontends should detect `type === "batch"`,
+         *     propagate the outer `ts` onto each entry in `events[]`, and then
+         *     dispatch each entry through the same per-type handler logic. The
+         *     `welcome` frame (one-shot per WS connect) is NOT batched.
+         */
+        WsEvent: components["schemas"]["WsEventBatch"] | components["schemas"]["WsEventWelcome"] | components["schemas"]["WsEventModuleDiscovered"] | components["schemas"]["WsEventModuleAlive"] | components["schemas"]["WsEventModuleRebooted"] | components["schemas"]["WsEventModuleStatus"] | components["schemas"]["WsEventDisplayFrameSent"] | components["schemas"]["WsEventDisplayCellSent"] | components["schemas"]["WsEventDisplaySettingsChanged"] | components["schemas"]["WsEventGridChanged"] | components["schemas"]["WsEventPresetAdded"] | components["schemas"]["WsEventPresetUpdated"] | components["schemas"]["WsEventPresetDeleted"] | components["schemas"]["WsEventDiscoveryStarted"] | components["schemas"]["WsEventDiscoveryComplete"] | components["schemas"]["WsEventScheduleFired"] | components["schemas"]["WsEventSettingsChanged"] | components["schemas"]["WsEventQuietHoursChanged"] | components["schemas"]["WsEventBootloaderStateChanged"] | components["schemas"]["WsEventBootloaderProgress"] | components["schemas"]["WsEventPong"];
+        /**
+         * @description Coalesced envelope: every publish() call on the device within a 100ms
+         *     window is appended to a queue, then flushed as a single `batch` event
+         *     with a flat `events` array. Each entry has the same `type` + `data`
+         *     shape as the unbatched event would; the outer `ts` is shared. Welcome
+         *     messages bypass this path.
+         *
+         *     Frontends should treat this as "iterate events[] and dispatch each
+         *     entry as if it had arrived individually, attaching this envelope's
+         *     ts". This keeps per-event-type handlers shape-compatible.
+         */
+        WsEventBatch: components["schemas"]["WsEnvelopeBase"] & {
+            /** @constant */
+            type: "batch";
+            /**
+             * @description Each entry is a `{type, data}` pair with the same payload shape
+             *     the corresponding WsEvent* schema documents (e.g. an entry with
+             *     `type: "module.status"` has the same `data` as
+             *     WsEventModuleStatus.data). The inner objects intentionally omit
+             *     `ts` — use the envelope's.
+             */
+            events: {
+                /** @description One of the discriminator values from WsEvent (except `batch`/`welcome`). */
+                type: string;
+                /** @description Per-event payload; see the matching WsEvent* schema for shape. */
+                data?: unknown;
+            }[];
+        } & {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "batch";
+        };
         /**
          * @description Sent once to a client right after the WebSocket handshake completes.
-         *     Gives the frontend a full initial snapshot so it doesn't need to
-         *     follow up with several GETs.
+         *     Minimal "you're connected" envelope — frontends should fetch the
+         *     bulky initial state (system, settings, grid, modules, display)
+         *     via the corresponding REST endpoints. Previously this carried the
+         *     full snapshot but the ~30–40 KB transient cJSON tree at 150 modules
+         *     was the dominant heap-pressure event in the system.
          */
         WsEventWelcome: components["schemas"]["WsEnvelopeBase"] & {
             /** @constant */
             type: "welcome";
             data: {
-                system: components["schemas"]["SystemInfo"];
-                settings: components["schemas"]["DisplaySettings"];
-                grid: components["schemas"]["Grid"];
-                modules: components["schemas"]["ModuleSummary"][];
-                display: components["schemas"]["LastFrame"];
+                /** @constant */
+                ready: true;
+                /** @description esp_app_desc_t.version */
+                fw_version: string;
+                /** @description ms since boot */
+                uptime_ms: number;
+                /** @description Currently-known modules */
+                module_count: number;
             };
         } & {
             /**
