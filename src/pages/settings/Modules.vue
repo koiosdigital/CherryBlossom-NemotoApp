@@ -92,6 +92,15 @@ function moduleAt(x: number, y: number) {
   return uuid ? modules.modules.value.find((m) => m.uuid === uuid) : null
 }
 
+// Cell is mapped to a UUID but that module isn't in the device registry —
+// e.g. it powered off or was physically removed but the grid mapping remains.
+// Returns the orphan UUID so the cell can render a ghost with a delete affordance.
+function ghostUuidAt(x: number, y: number): string | null {
+  const uuid = cellIndex.value.get(`${x},${y}`)
+  if (!uuid) return null
+  return modules.modules.value.some((m) => m.uuid === uuid) ? null : uuid
+}
+
 const unmapped = computed(() =>
   modules.modules.value.filter((m) => !m.grid)
 )
@@ -833,6 +842,24 @@ function uuidParts(u: string) {
                     "
                     class="absolute right-0.5 top-0.5 size-2.5 text-amber-500"
                   />
+                </button>
+                <button
+                  v-else-if="ghostUuidAt(x - 1, y - 1)"
+                  type="button"
+                  :title="`(${x - 1}, ${y - 1}) · ${ghostUuidAt(x - 1, y - 1)} — offline, click to clear`"
+                  class="relative flex flex-col items-center justify-between gap-1 rounded-sm border border-dashed border-amber-500/50 bg-amber-500/5 p-1.5 text-muted-foreground transition-colors hover:border-destructive hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="removeAt(x - 1, y - 1)"
+                >
+                  <span class="status-dot size-1.5! text-muted-foreground/60" />
+                  <span class="flex flex-col items-center font-mono text-[10px] leading-tight tracking-tight opacity-70">
+                    <span
+                      v-for="part in uuidParts(ghostUuidAt(x - 1, y - 1)!)"
+                      :key="part"
+                    >
+                      {{ part }}
+                    </span>
+                  </span>
+                  <Trash2 class="absolute right-0.5 top-0.5 size-2.5 text-amber-500" />
                 </button>
                 <button
                   v-else
