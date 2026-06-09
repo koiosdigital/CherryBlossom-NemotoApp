@@ -19,6 +19,7 @@ import {
   ChevronLeft,
   Eraser,
   Loader2,
+  Move,
   Paintbrush,
   Save,
   Type,
@@ -59,11 +60,20 @@ const dirty = ref(false)
 const ready = ref(false)
 
 // ---------- editing state ----------
-type Mode = 'type' | 'paint' | 'erase'
+type Mode = 'type' | 'paint' | 'erase' | 'move'
 const mode = ref<Mode>('type')
 const brush = ref<number | null>(null)
 const cursor = ref({ x: 0, y: 0 })
 const painting = ref(false)
+
+// ---------- move-preset mode ----------
+// Set when an edit-preset is loaded whose dimensions don't match the current
+// grid. We blow the preset up to grid size and let the user position it.
+// `cells.value` is grid-sized at all times — `presetSource` keeps the original
+// so movement re-renders fresh (cropped) content rather than scrolling stale.
+const presetSource = ref<{ w: number; h: number; flaps: number[][] } | null>(null)
+const offset = ref({ x: 0, y: 0 })
+const dragOrigin = ref<{ cellX: number; cellY: number; offsetX: number; offsetY: number } | null>(null)
 
 // ---------- derived ----------
 const blankId = computed(
@@ -123,9 +133,102 @@ async function loadPreset(id: number) {
     return
   }
   presetName.value = data.name
-  width.value = data.width
-  height.value = data.height
-  cells.value = data.flaps.map((r) => [...r])
+  await ensureGridLoaded()
+  const g = gridState.grid.value?.grid
+  if (g && (data.width !== g.width || data.height !== g.height)) {
+    // Dimensions don't match the grid — drop into move mode. Canvas becomes
+    // grid-sized, the preset gets centered, and the user can drag it around.
+    // Save flushes whatever is currently overlaid on the canvas.
+    width.value = g.width
+    height.value = g.height
+    presetSource.value = {
+      w: data.width,
+      h: data.height,
+      flaps: data.flaps.map((r) => [...r]),
+    }
+    offset.value = {
+      x: Math.floor((g.width - data.width) / 2),
+      y: Math.floor((g.height - data.height) / 2),
+    }
+    rebuildFromPreset()
+    mode.value = 'move'
+    // The on-disk preset won't fit the grid — saving the current overlay
+    // resizes it. Treat as dirty so the user can save immediately.
+    dirty.value = true
+    toast({
+      title: 'Preset resized',
+      description: `Was ${data.width}×${data.height}, grid is ${g.width}×${g.height}. Drag into position and save.`,
+      variant: 'warn',
+      duration: 6000,
+    })
+  } else {
+    width.value = data.width
+    height.value = data.height
+    cells.value = data.flaps.map((r) => [...r])
+  }
+}
+
+// ---------- move-mode helpers ----------
+function rebuildFromPreset() {
+  if (!presetSource.value) return
+  const next = buildBlank(width.value, height.value)
+  const { w: pw, h: ph, flaps: pf } = presetSource.value
+  const { x: ox, y: oy } = offset.value
+  for (let py = 0; py < ph; py++) {
+    for (let px = 0; px < pw; px++) {
+      const gx = px + ox
+      const gy = py + oy
+      if (gx < 0 || gy < 0 || gx >= width.value || gy >= height.value) continue
+      next[gy][gx] = pf[py][px]
+    }
+  }
+  cells.value = next
+}
+
+function clampedOffset(x: number, y: number) {
+  if (!presetSource.value) return { x, y }
+  // Allow the preset to slide partially off the grid in either direction so
+  // the user can deliberately crop edges — but require at least one cell to
+  // remain on-grid so the preview doesn't vanish.
+  const minX = -(presetSource.value.w - 1)
+  const maxX = width.value - 1
+  const minY = -(presetSource.value.h - 1)
+  const maxY = height.value - 1
+  return {
+    x: Math.max(minX, Math.min(maxX, x)),
+    y: Math.max(minY, Math.min(maxY, y)),
+  }
+}
+
+function moveBy(dx: number, dy: number) {
+  if (!presetSource.value) return
+  const next = clampedOffset(offset.value.x + dx, offset.value.y + dy)
+  if (next.x === offset.value.x && next.y === offset.value.y) return
+  offset.value = next
+  rebuildFromPreset()
+  dirty.value = true
+}
+
+function centerPreset() {
+  if (!presetSource.value) return
+  offset.value = {
+    x: Math.floor((width.value - presetSource.value.w) / 2),
+    y: Math.floor((height.value - presetSource.value.h) / 2),
+  }
+  rebuildFromPreset()
+  dirty.value = true
+}
+
+function isInsidePreset(x: number, y: number) {
+  if (!presetSource.value) return false
+  const px = x - offset.value.x
+  const py = y - offset.value.y
+  return (
+    px >= 0 &&
+    py >= 0 &&
+    px < presetSource.value.w &&
+    py < presetSource.value.h
+  )
 }
 
 async function ensureFlapsLoaded() {
@@ -187,6 +290,18 @@ function applyBrushAt(x: number, y: number) {
 }
 
 function onCellPointerDown(x: number, y: number, e: PointerEvent) {
+  if (mode.value === 'move') {
+    if (!presetSource.value) return
+    dragOrigin.value = {
+      cellX: x,
+      cellY: y,
+      offsetX: offset.value.x,
+      offsetY: offset.value.y,
+    }
+    painting.value = true
+    e.preventDefault()
+    return
+  }
   if (mode.value === 'type') {
     cursor.value = { x, y }
     return
@@ -198,11 +313,26 @@ function onCellPointerDown(x: number, y: number, e: PointerEvent) {
 
 function onCellPointerEnter(x: number, y: number) {
   if (!painting.value) return
+  if (mode.value === 'move') {
+    const o = dragOrigin.value
+    if (!o) return
+    const next = clampedOffset(
+      o.offsetX + (x - o.cellX),
+      o.offsetY + (y - o.cellY)
+    )
+    if (next.x !== offset.value.x || next.y !== offset.value.y) {
+      offset.value = next
+      rebuildFromPreset()
+      dirty.value = true
+    }
+    return
+  }
   applyBrushAt(x, y)
 }
 
 function onPointerUp() {
   painting.value = false
+  dragOrigin.value = null
 }
 
 function pickBrush(id: number) {
@@ -234,6 +364,18 @@ function onKeyDown(e: KeyboardEvent) {
   }
   if (e.key === '3') {
     mode.value = 'erase'
+    return
+  }
+  if (e.key === '4' && presetSource.value) {
+    mode.value = 'move'
+    return
+  }
+
+  if (mode.value === 'move') {
+    if (e.key === 'ArrowLeft') { moveBy(-1, 0); e.preventDefault(); return }
+    if (e.key === 'ArrowRight') { moveBy(1, 0); e.preventDefault(); return }
+    if (e.key === 'ArrowUp') { moveBy(0, -1); e.preventDefault(); return }
+    if (e.key === 'ArrowDown') { moveBy(0, 1); e.preventDefault(); return }
     return
   }
 
@@ -446,6 +588,28 @@ onBeforeUnmount(() => {
       </div>
     </details>
 
+    <!-- Mismatch banner: shown when the loaded preset doesn't fit the grid -->
+    <div
+      v-if="presetSource"
+      class="flex flex-wrap items-center gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs"
+    >
+      <span class="font-medium text-amber-700 dark:text-amber-300">
+        Resized to fit the grid
+      </span>
+      <span class="text-muted-foreground">
+        Was {{ presetSource.w }} × {{ presetSource.h }}, grid is {{ width }} × {{ height }}.
+        Drag the preset into position — anything outside the edges is cropped on save.
+      </span>
+      <Button
+        size="sm"
+        variant="ghost"
+        class="ml-auto"
+        @click="centerPreset"
+      >
+        Center
+      </Button>
+    </div>
+
     <!-- Mode toggle -->
     <div class="flex items-center gap-2">
       <div
@@ -453,7 +617,9 @@ onBeforeUnmount(() => {
         role="group"
       >
         <button
-          v-for="m in (['type', 'paint', 'erase'] as const)"
+          v-for="m in (presetSource
+            ? (['move', 'type', 'paint', 'erase'] as const)
+            : (['type', 'paint', 'erase'] as const))"
           :key="m"
           type="button"
           class="inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs capitalize transition-colors"
@@ -464,6 +630,7 @@ onBeforeUnmount(() => {
           "
           @click="mode = m"
         >
+          <Move v-if="m === 'move'" class="size-3.5" />
           <Type v-if="m === 'type'" class="size-3.5" />
           <Paintbrush v-if="m === 'paint'" class="size-3.5" />
           <Eraser v-if="m === 'erase'" class="size-3.5" />
@@ -471,7 +638,13 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <span class="hidden text-xs text-muted-foreground sm:inline">
-        Press 1/2/3 to switch modes
+        Press {{ presetSource ? '1/2/3/4' : '1/2/3' }} to switch modes
+      </span>
+      <span
+        v-if="mode === 'move' && presetSource"
+        class="num ml-auto text-xs text-muted-foreground"
+      >
+        offset ({{ offset.x }}, {{ offset.y }})
       </span>
     </div>
 
@@ -535,7 +708,14 @@ onBeforeUnmount(() => {
           <div
             v-for="x in width"
             :key="`${x}-${y}`"
-            class="relative cursor-pointer select-none touch-none"
+            class="relative select-none touch-none"
+            :class="
+              mode === 'move'
+                ? painting
+                  ? 'cursor-grabbing'
+                  : 'cursor-grab'
+                : 'cursor-pointer'
+            "
             @pointerdown="onCellPointerDown(x - 1, y - 1, $event)"
             @pointerenter="onCellPointerEnter(x - 1, y - 1)"
           >
@@ -547,6 +727,16 @@ onBeforeUnmount(() => {
                 cursor.y === y - 1
               "
               class="pointer-events-none absolute inset-0 rounded-[4px] ring-2 ring-primary ring-inset"
+            />
+            <!-- Move-mode overlay: ring around the preset's footprint, dim
+                 mask over anything outside it. -->
+            <div
+              v-else-if="mode === 'move' && isInsidePreset(x - 1, y - 1)"
+              class="pointer-events-none absolute inset-0 rounded-[4px] ring-2 ring-primary/70 ring-inset"
+            />
+            <div
+              v-else-if="mode === 'move'"
+              class="pointer-events-none absolute inset-0 rounded-[4px] bg-black/30"
             />
           </div>
         </template>
