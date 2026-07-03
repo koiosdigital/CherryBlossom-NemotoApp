@@ -1,17 +1,70 @@
 import { onBeforeUnmount, ref } from 'vue'
 import { API_BASE } from '@/api'
-import type { components } from '@/api.d'
 
-type WsEvent = components['schemas']['WsEvent']
-type WsEventType = WsEvent['type']
-type WsEventOf<T extends WsEventType> = Extract<WsEvent, { type: T }>
+// ============================================================================
+// WS protocol — read-only state stream (server -> client only, plus pings).
+//
+// Every wire message is a JSON array of inner arrays:
+//
+//   [["ms","B3FC0BEEA240",3,5],["t","display"]]
+//
+// Two inner-array categories:
+//
+//   DELTA — small, frequent state updates.
+//     ["ms", uuid, state_code, flap]   module status     -> on('ms', cb)
+//     ["ma", uuid]                     module alive      -> on('ma', cb)
+//     ["mr", uuid]                     module rebooted   -> on('mr', cb)
+//     ["md", uuid, short_id]           module discovered -> on('md', cb)
+//     ["bp", sent, acked, done, total] bootloader prog   -> on('bp', cb)
+//
+//   TICK — "this REST resource changed, refetch if you care".
+//     ["t", "display"]                                   -> onTick('display', cb)
+//     ["t", "display.cfg"]                               -> onTick('display.cfg', cb)
+//     ["t", "grid"]                                      -> onTick('grid', cb)
+//     ["t", "bootloader"]                                -> onTick('bootloader', cb)
+//     ["t", "presets"]                                   -> onTick('presets', cb)
+//     ["t", "settings"]                                  -> onTick('settings', cb)
+//     ["t", "quiet_hours"]                               -> onTick('quiet_hours', cb)
+//     ["t", "schedule", <id>]                            -> onTick('schedule', cb)
+//
+// All control / mutation goes through REST. This socket never receives
+// commands from us — only outbound pings (server replies with ["pong", ts]).
+// ============================================================================
 
 const WS_URL = `${API_BASE.replace(/^http/, 'ws')}/api/ws`
 
-type Handler<T extends WsEventType> = (ev: WsEventOf<T>) => void
-type AnyHandler = (ev: WsEvent) => void
+// ---- Delta event types -----------------------------------------------------
 
-const handlers = new Map<WsEventType | '*', Set<AnyHandler>>()
+type DeltaHandlers = {
+  ms: (uuid: string, state: number, flap: number) => void
+  ma: (uuid: string) => void
+  mr: (uuid: string) => void
+  md: (uuid: string, shortId: number) => void
+  bp: (blocksSent: number, blocksAcked: number, devicesDone: number, devicesTotal: number) => void
+}
+
+type DeltaCode = keyof DeltaHandlers
+
+// ---- Tick event types ------------------------------------------------------
+
+type TickResource =
+  | 'display'        // full frame pushed (preset, render)
+  | 'display.cell'   // single-cell poke (manual flap)
+  | 'display.cfg'    // settings (effect / delay / cycle)
+  | 'grid'
+  | 'bootloader'
+  | 'presets'
+  | 'settings'
+  | 'quiet_hours'
+
+type TickHandler = () => void
+type ScheduleTickHandler = (id: number) => void
+
+// ---- Internal state --------------------------------------------------------
+
+const deltaBuckets = new Map<DeltaCode, Set<(...args: unknown[]) => void>>()
+const tickBuckets  = new Map<TickResource, Set<TickHandler>>()
+const scheduleBucket = new Set<ScheduleTickHandler>()
 const reconnectListeners = new Set<() => void>()
 
 let socket: WebSocket | null = null
@@ -19,24 +72,57 @@ let backoff = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let visibilityWired = false
 
-function dispatch(ev: WsEvent) {
-  const bucket = handlers.get(ev.type)
-  if (bucket) bucket.forEach((h) => h(ev))
-  const star = handlers.get('*')
-  if (star) star.forEach((h) => h(ev))
-}
-
-// Shared connection status. `everConnected` flips true on first successful
-// open and never resets — so consumers can distinguish "still handshaking" from
-// "we lost the connection".
 const connected = ref(false)
 const everConnected = ref(false)
 const reconnectAttempts = ref(0)
 
-function connect() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+// ---- Dispatch --------------------------------------------------------------
+
+function dispatchInner(arr: unknown[]) {
+  if (!Array.isArray(arr) || arr.length === 0) return
+  const code = arr[0]
+  if (typeof code !== 'string') return
+
+  if (code === 't') {
+    const resource = arr[1]
+    if (typeof resource !== 'string') return
+    if (resource === 'schedule') {
+      const id = arr[2]
+      if (typeof id === 'number') scheduleBucket.forEach((h) => h(id))
+      return
+    }
+    const bucket = tickBuckets.get(resource as TickResource)
+    if (bucket) bucket.forEach((h) => h())
     return
   }
+
+  // Server keepalive reply — ignore.
+  if (code === 'pong') return
+
+  const bucket = deltaBuckets.get(code as DeltaCode)
+  if (!bucket) return
+  // Rest of arr are the handler's positional args.
+  const args = arr.slice(1)
+  bucket.forEach((h) => h(...args))
+}
+
+function dispatch(raw: unknown) {
+  if (!Array.isArray(raw)) return
+  // A batch is an array of arrays; a single inner event is itself an array.
+  // Distinguish by inspecting the first element: if it's an array, this is
+  // a batch; otherwise it's one inner event.
+  if (raw.length > 0 && Array.isArray(raw[0])) {
+    for (const inner of raw) dispatchInner(inner as unknown[])
+  } else {
+    dispatchInner(raw as unknown[])
+  }
+}
+
+// ---- Connection ------------------------------------------------------------
+
+function connect() {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return
+
   socket = new WebSocket(WS_URL)
   socket.onopen = () => {
     const wasReconnect = everConnected.value
@@ -45,52 +131,29 @@ function connect() {
     connected.value = true
     everConnected.value = true
     if (wasReconnect) {
-      // Welcome events from the device re-seed grid / modules / display on
-      // their own. This hook lets composables that don't subscribe to
-      // welcome (schedules, bootloader, etc.) refresh their state.
+      // Composables refetch their REST snapshot here, since deltas alone
+      // won't catch state that changed during the outage.
       reconnectListeners.forEach((fn) => {
-        try { fn() } catch { /* swallow — one bad listener shouldn't poison the rest */ }
+        try { fn() } catch { /* one bad listener shouldn't poison the rest */ }
       })
     }
   }
   socket.onmessage = (msg) => {
     let raw: unknown
-    try {
-      raw = JSON.parse(msg.data)
-    } catch {
-      return
-    }
-    // The device coalesces broadcasts in a 100ms window and emits them as
-    // one `batch` envelope with an `events` array. Unfold here so downstream
-    // handlers stay event-type-specific — they don't need to know batching
-    // exists. The outer batch's `ts` is propagated onto each inner event so
-    // they remain shape-compatible with non-batched envelopes (e.g. welcome,
-    // pong).
-    const envelope = raw as { type?: string; ts?: number; events?: Array<{ type: string; data?: unknown }> }
-    if (envelope && envelope.type === 'batch' && Array.isArray(envelope.events)) {
-      const ts = envelope.ts ?? 0
-      for (const inner of envelope.events) {
-        dispatch({ ...inner, ts } as WsEvent)
-      }
-      return
-    }
-    dispatch(raw as WsEvent)
+    try { raw = JSON.parse(msg.data) } catch { return }
+    dispatch(raw)
   }
   socket.onclose = () => {
     socket = null
     connected.value = false
     scheduleReconnect()
   }
-  socket.onerror = () => {
-    socket?.close()
-  }
+  socket.onerror = () => { socket?.close() }
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return
-  // Aggressive backoff for a local-network app: 500ms, 1s, 2s, 4s, then cap
-  // at 5s. The display's web server is right there — long backoffs just feel
-  // broken.
+  // Local-network backoff: 500ms, 1s, 2s, 4s, then cap at 5s.
   const delay = Math.min(500 * 2 ** Math.min(backoff, 3), 5000)
   backoff += 1
   reconnectAttempts.value = backoff
@@ -101,10 +164,7 @@ function scheduleReconnect() {
 }
 
 function forceReconnect() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   backoff = 0
   reconnectAttempts.value = 0
   if (socket && socket.readyState !== WebSocket.OPEN) {
@@ -114,16 +174,11 @@ function forceReconnect() {
   connect()
 }
 
-// When the tab becomes visible again or the network comes back, browsers
-// don't always synthesise a close event — the socket can sit half-open. Force
-// a reconnect check on these signals.
 function wireVisibility() {
   if (visibilityWired || typeof document === 'undefined') return
   visibilityWired = true
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && !connected.value) {
-      forceReconnect()
-    }
+    if (document.visibilityState === 'visible' && !connected.value) forceReconnect()
   })
   if (typeof window !== 'undefined') {
     window.addEventListener('online', () => {
@@ -132,33 +187,43 @@ function wireVisibility() {
   }
 }
 
+// ---- Public API ------------------------------------------------------------
+
 export function useWebsocket() {
   wireVisibility()
   connect()
 
   const disposers: Array<() => void> = []
 
-  function on<T extends WsEventType>(type: T, handler: Handler<T>): () => void
-  function on(type: '*', handler: AnyHandler): () => void
-  function on(type: WsEventType | '*', handler: AnyHandler): () => void {
-    let bucket = handlers.get(type)
-    if (!bucket) {
-      bucket = new Set()
-      handlers.set(type, bucket)
+  function on<C extends DeltaCode>(code: C, handler: DeltaHandlers[C]): () => void {
+    let bucket = deltaBuckets.get(code)
+    if (!bucket) { bucket = new Set(); deltaBuckets.set(code, bucket) }
+    bucket.add(handler as unknown as (...args: unknown[]) => void)
+    const dispose = () => { bucket!.delete(handler as unknown as (...args: unknown[]) => void) }
+    disposers.push(dispose)
+    return dispose
+  }
+
+  function onTick(resource: 'schedule', handler: ScheduleTickHandler): () => void
+  function onTick(resource: TickResource, handler: TickHandler): () => void
+  function onTick(resource: TickResource | 'schedule', handler: TickHandler | ScheduleTickHandler): () => void {
+    if (resource === 'schedule') {
+      scheduleBucket.add(handler as ScheduleTickHandler)
+      const dispose = () => { scheduleBucket.delete(handler as ScheduleTickHandler) }
+      disposers.push(dispose)
+      return dispose
     }
-    bucket.add(handler)
-    const dispose = () => {
-      bucket!.delete(handler)
-    }
+    let bucket = tickBuckets.get(resource)
+    if (!bucket) { bucket = new Set(); tickBuckets.set(resource, bucket) }
+    bucket.add(handler as TickHandler)
+    const dispose = () => { bucket!.delete(handler as TickHandler) }
     disposers.push(dispose)
     return dispose
   }
 
   function onReconnect(fn: () => void): () => void {
     reconnectListeners.add(fn)
-    const dispose = () => {
-      reconnectListeners.delete(fn)
-    }
+    const dispose = () => { reconnectListeners.delete(fn) }
     disposers.push(dispose)
     return dispose
   }
@@ -170,6 +235,7 @@ export function useWebsocket() {
 
   return {
     on,
+    onTick,
     onReconnect,
     connected,
     everConnected,

@@ -30,12 +30,8 @@ async function load(force = false) {
 function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
-  // Welcome no longer carries grid — REST-fetched via load() on mount, and
-  // again on reconnect so post-outage mutations land in our cache.
   ws.onReconnect(() => { load(true) })
-  ws.on('grid.changed', (ev) => {
-    grid.value = ev.data
-  })
+  ws.onTick('grid', () => { load(true) })
 }
 
 // Optimistic mutation wrapper. The local cache updates immediately so the UI

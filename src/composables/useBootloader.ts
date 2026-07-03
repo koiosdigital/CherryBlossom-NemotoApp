@@ -35,34 +35,27 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
 
-  ws.on('bootloader.state_changed', (ev) => {
-    status.value = ev.data
-    loaded = true
-  })
+  // Full snapshot refetch on any non-progress state change — the OTA
+  // worker fires this on every state transition (arming → discovering →
+  // flashing → success/failed/aborted) and at fleet milestones.
+  ws.onTick('bootloader', () => { load(true).catch(() => {}) })
 
-  // Lightweight beacon fired during `flashing`. Patch the per-device
-  // counters in place so the progress bar updates without waiting for
-  // the next full snapshot.
-  ws.on('bootloader.progress', (ev) => {
+  // Lightweight delta during `flashing` — only the four counters that
+  // actually move per-block. Patch in place so the progress bar advances
+  // without an extra REST roundtrip per 32-block tick.
+  ws.on('bp', (blocksSent, blocksAcked, devicesDone, devicesTotal) => {
     const cur = status.value
     if (!cur) return
     status.value = {
       ...cur,
-      state: ev.data.state,
-      current_short_id: ev.data.current_short_id,
-      current_blocks_sent: ev.data.current_blocks_sent,
-      current_blocks_acked: ev.data.current_blocks_acked,
-      image_blocks: ev.data.image_blocks,
-      devices_done: ev.data.devices_done,
-      devices_failed: ev.data.devices_failed,
-      devices_total: ev.data.devices_total,
+      current_blocks_sent: blocksSent,
+      current_blocks_acked: blocksAcked,
+      devices_done: devicesDone,
+      devices_total: devicesTotal,
     }
   })
-  // Resync after a reconnect so an OTA that started or finished during the
-  // outage shows up correctly.
-  ws.onReconnect(() => {
-    load(true).catch(() => {})
-  })
+
+  ws.onReconnect(() => { load(true).catch(() => {}) })
 }
 
 export function useBootloader() {

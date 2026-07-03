@@ -15,6 +15,16 @@ type ModuleEntry = ModuleSummary & {
   persisted?: PersistedConfig | null
 }
 
+// Wire state_code → ModuleStatus.state name. Matches the firmware enum order
+// (see CAN_STEPPER_STATE_* in can_protocol.h).
+const STATE_NAMES = [
+  'idle', 'homing', 'accel', 'cruise', 'decel', 'rehoming', 'error',
+] as const
+
+function stateName(code: number): ModuleStatus['state'] {
+  return (STATE_NAMES[code] ?? 'unknown') as ModuleStatus['state']
+}
+
 const modules = ref<ModuleEntry[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -47,49 +57,45 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
 
-  // Welcome no longer carries the modules array — the device used to ship
-  // the full list (~30 KB transient cJSON for 150 modules) in welcome but
-  // we already REST-fetch via load() on mount, and again via onReconnect
-  // below if the socket drops. Stripping that duplication was the single
-  // biggest heap-pressure fix on the firmware side.
+  // Always REST-fetch on connect/reconnect — deltas alone can't reconstruct
+  // state that changed during the outage.
   ws.onReconnect(() => { load(true) })
 
-  ws.on('module.discovered', (ev) => {
-    const { uuid, short_id, hw_type } = ev.data
+  ws.on('md', (uuid, shortId) => {
     const exists = modules.value.find((m) => m.uuid === uuid)
     if (exists) {
-      patch(uuid, (m) => ({ ...m, short_id, hw_type }))
+      patch(uuid, (m) => ({ ...m, short_id: shortId }))
     } else {
       modules.value = [
         ...modules.value,
-        { uuid, short_id, hw_type, assigned: false, alive: true, grid: null },
+        { uuid, short_id: shortId, hw_type: 0x10, assigned: false, alive: true, grid: null },
       ]
     }
   })
-  ws.on('module.alive', (ev) => patch(ev.data.uuid, (m) => ({ ...m, alive: true })))
-  ws.on('module.rebooted', (ev) => {
-    // Module just booted — 100 ms detect via DEVICE_BOOTED frame.
-    // Status and persisted cache are now stale; clear them so consumers
-    // don't act on pre-reboot state. Fresh data will arrive via the next
-    // module.status and any consumer calling fetchModule().
-    const { uuid } = ev.data
+  ws.on('ma', (uuid) => patch(uuid, (m) => ({ ...m, alive: true })))
+  ws.on('mr', (uuid) => {
+    // DEVICE_BOOTED detected — module just rebooted. Clear cached status so
+    // consumers don't act on pre-reboot state; the seeder will refill it.
+    patch(uuid, (m) => ({ ...m, alive: true, status: null }))
+  })
+  ws.on('ms', (uuid, state, flap) => {
+    // flap == 255 is firmware-guaranteed to mean "not homed yet" — see
+    // CAN_StatusResponse.current_flap. step/temp_c aren't on the wire any
+    // more; the UI only reads them from explicit REST fetches.
     patch(uuid, (m) => ({
       ...m,
-      alive: true,
-      status: null,
+      status: {
+        ...(m.status ?? { step: 0, temp_c: 0 }),
+        state: stateName(state),
+        state_code: state,
+        flap: flap === 255 ? null : flap,
+        homed: flap !== 255,
+      } as ModuleStatus,
     }))
   })
-  ws.on('module.status', (ev) =>
-    patch(ev.data.uuid, (m) => ({ ...m, status: ev.data.status }))
-  )
-  ws.on('grid.changed', (ev) => {
-    const grid = new Map(ev.data.mapping.map((g) => [g.uuid, { x: g.x, y: g.y }]))
-    modules.value = modules.value.map((m) => ({
-      ...m,
-      grid: grid.get(m.uuid) ?? null,
-      assigned: grid.has(m.uuid),
-    }))
-  })
+  // Grid changes are large + rare — refetch the full list to re-derive
+  // each module's `grid` + `assigned` fields, matching the previous behaviour.
+  ws.onTick('grid', () => { load(true) })
 }
 
 export function useModules() {

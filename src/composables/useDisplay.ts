@@ -32,21 +32,15 @@ async function load(force = false) {
 function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
-  // Welcome no longer carries display — REST-fetched via load() on mount,
-  // and again on reconnect.
   ws.onReconnect(() => { load(true) })
-  ws.on('display.frame_sent', (ev) => {
-    lastFrame.value = ev.data
-  })
-  ws.on('display.cell_sent', (ev) => {
-    // A single-cell poke means whatever preset was showing is no longer whole.
+  // Full-frame push (preset / render): refetch but keep currentPresetId,
+  // since the caller (showPreset) sets it explicitly.
+  ws.onTick('display', () => { load(true) })
+  // Single-cell poke: the preset is no longer pristine, clear it.
+  ws.onTick('display.cell', () => {
     currentPresetId.value = null
     currentPresetName.value = null
-    const frame = lastFrame.value
-    if (!frame?.flaps) return
-    const flaps = frame.flaps.map((row) => [...row])
-    if (flaps[ev.data.y]) flaps[ev.data.y][ev.data.x] = ev.data.flap
-    lastFrame.value = { ...frame, flaps }
+    load(true)
   })
 }
 

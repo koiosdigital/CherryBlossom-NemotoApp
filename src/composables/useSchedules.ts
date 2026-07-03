@@ -43,11 +43,9 @@ function patch(id: number, fn: (s: Schedule) => Schedule) {
 function bindWs(ws: ReturnType<typeof useWebsocket>) {
   if (wsBound) return
   wsBound = true
-  // The WS event only carries id, action, blocked_by_quiet — refetch the
-  // single record so last_run_ms is accurate without a full list reload.
-  ws.on('schedule.fired', (ev) => {
-    const id = ev.data.id
-    if (ev.data.blocked_by_quiet) return
+  // schedule tick carries just the id — refetch that one record so
+  // last_run_ms is accurate without a full list reload.
+  ws.onTick('schedule', (id) => {
     apiClient
       .GET('/api/schedules/{id}', { params: { path: { id } } })
       .then(({ data }) => {
@@ -55,11 +53,9 @@ function bindWs(ws: ReturnType<typeof useWebsocket>) {
       })
       .catch(() => {})
   })
-  // Schedules aren't in the welcome payload — pull a fresh list whenever the
-  // socket reconnects so anything created or fired during the outage shows up.
-  ws.onReconnect(() => {
-    load(true).catch(() => {})
-  })
+  // Pull a fresh list whenever the socket reconnects so anything created
+  // or fired during the outage shows up.
+  ws.onReconnect(() => { load(true).catch(() => {}) })
 }
 
 export function useSchedules() {
