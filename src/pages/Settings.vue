@@ -27,18 +27,20 @@ import {
   ChevronRight,
   Clock as ClockIcon,
   Cpu,
+  FileUp,
   Loader2,
   Moon,
   Plus,
   Power,
   Save,
   Trash2,
+  Upload,
   Wifi,
   WifiLow,
   WifiOff,
   Globe,
 } from 'lucide-vue-next'
-import { apiClient } from '@/api'
+import { apiClient, API_BASE } from '@/api'
 import type { components } from '@/api.d'
 import { useTime } from '@/composables/useTime'
 import { useModules } from '@/composables/useModules'
@@ -257,6 +259,71 @@ async function reboot() {
     rebooting.value = false
     rebootOpen.value = false
   }
+}
+
+// ---------- Manual firmware update ----------
+const otaInput = ref<HTMLInputElement | null>(null)
+const otaFile = ref<File | null>(null)
+const otaUploading = ref(false)
+const otaPct = ref(0)
+const otaError = ref<string | null>(null)
+const otaDone = ref(false)
+
+function pickOtaFile() {
+  otaInput.value?.click()
+}
+
+function onOtaFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  otaFile.value = input.files?.[0] ?? null
+  otaError.value = null
+  otaDone.value = false
+  input.value = ''
+}
+
+function fmtSize(bytes: number) {
+  return bytes >= 1_048_576
+    ? `${(bytes / 1_048_576).toFixed(1)} MB`
+    : `${Math.round(bytes / 1024)} KB`
+}
+
+function uploadOta() {
+  const file = otaFile.value
+  if (!file || otaUploading.value) return
+  otaUploading.value = true
+  otaPct.value = 0
+  otaError.value = null
+  otaDone.value = false
+
+  // XHR instead of fetch: fetch has no upload progress events.
+  const xhr = new XMLHttpRequest()
+  xhr.open('POST', `${API_BASE}/api/system/ota`)
+  xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      otaPct.value = Math.round((e.loaded / e.total) * 100)
+    }
+  }
+  xhr.onload = () => {
+    otaUploading.value = false
+    if (xhr.status === 200) {
+      otaPct.value = 100
+      otaDone.value = true
+      otaFile.value = null
+      toast({
+        title: 'Firmware installed',
+        description: 'The device is rebooting into the new firmware.',
+        variant: 'success',
+      })
+    } else {
+      otaError.value = xhr.responseText || `Upload failed (HTTP ${xhr.status})`
+    }
+  }
+  xhr.onerror = () => {
+    otaUploading.value = false
+    otaError.value = 'Network error during upload'
+  }
+  xhr.send(file)
 }
 
 // ---------- Boot ----------
@@ -619,6 +686,70 @@ onMounted(() => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+      </CardFooter>
+    </Card>
+
+    <!-- Manual firmware update -->
+    <Card>
+      <CardHeader>
+        <CardTitle>Firmware update</CardTitle>
+        <CardDescription>
+          Manually install a firmware image (.bin). The device verifies the
+          image, then reboots into it<template v-if="about">
+            — currently running {{ about.version }}</template>.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-3">
+        <input
+          ref="otaInput"
+          type="file"
+          accept=".bin,application/octet-stream"
+          class="hidden"
+          @change="onOtaFileChange"
+        />
+        <div class="flex flex-wrap items-center gap-2">
+          <Button variant="outline" :disabled="otaUploading" @click="pickOtaFile">
+            <FileUp />
+            Choose file
+          </Button>
+          <span v-if="otaFile" class="text-sm num">
+            {{ otaFile.name }} · {{ fmtSize(otaFile.size) }}
+          </span>
+          <span v-else class="text-sm text-muted-foreground">
+            No file selected
+          </span>
+        </div>
+        <div v-if="otaUploading" class="flex flex-col gap-1.5">
+          <div
+            class="flex items-center justify-between text-xs text-muted-foreground num"
+          >
+            <span>Uploading…</span>
+            <span>{{ otaPct }}%</span>
+          </div>
+          <div class="h-2 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              class="h-full bg-primary transition-[width] duration-200"
+              :style="{ width: `${otaPct}%` }"
+            />
+          </div>
+        </div>
+        <p v-if="otaDone" class="text-sm text-muted-foreground">
+          Upload complete — the device is rebooting into the new firmware.
+        </p>
+        <p v-if="otaError" class="text-sm text-destructive">
+          {{ otaError }}
+        </p>
+      </CardContent>
+      <CardFooter>
+        <Button
+          variant="destructive"
+          :disabled="!otaFile || otaUploading"
+          @click="uploadOta"
+        >
+          <Loader2 v-if="otaUploading" class="animate-spin" />
+          <Upload v-else />
+          Upload &amp; install
+        </Button>
       </CardFooter>
     </Card>
 

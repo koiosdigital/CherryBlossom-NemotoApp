@@ -41,6 +41,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system/ota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Manual OTA — upload a firmware image and reboot into it
+         * @description Body MUST be the raw ESP-IDF app image (`.bin` as produced by
+         *     `idf.py build`). The image is streamed straight into the inactive OTA
+         *     partition (`ota_0`/`ota_1`), validated (`esp_ota_end`), set as the
+         *     boot partition, and the device reboots ~500ms after replying.
+         *
+         *     The first byte is checked against the ESP-IDF image magic (`0xE9`);
+         *     non-firmware uploads are rejected early with 400.
+         */
+        post: operations["uploadFirmware"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/time": {
         parameters: {
             query?: never;
@@ -2348,6 +2374,66 @@ export interface operations {
                         note: string;
                     };
                 };
+            };
+        };
+    };
+    uploadFirmware: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Image flashed and verified; reboot scheduled. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        ok: true;
+                        /** @description Bytes written. */
+                        size: number;
+                        /** @description Target partition label (e.g. `app1`). */
+                        partition: string;
+                        note: string;
+                    };
+                };
+            };
+            /** @description Empty body, bad image magic, or image validation failed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Receive timeout mid-upload (OTA aborted). */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Image larger than the OTA partition. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description OTA begin/write failed or no OTA partition available. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
