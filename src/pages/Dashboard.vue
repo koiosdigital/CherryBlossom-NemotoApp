@@ -8,6 +8,7 @@ import {
   CardTitle,
   Button,
   Badge,
+  Input,
   Label,
   Slider,
   Switch,
@@ -20,10 +21,12 @@ import {
   DialogClose,
 } from '@/components/ui'
 import {
+  BookmarkPlus,
   Eraser,
   Loader2,
   Pencil,
   Play,
+  Save,
   Sparkles,
 } from 'lucide-vue-next'
 import DisplayCell from '@/components/DisplayCell.vue'
@@ -100,6 +103,55 @@ async function clearDisplay() {
     })
   } finally {
     clearing.value = false
+  }
+}
+
+// ---------- save as preset ----------
+const saveOpen = ref(false)
+const saveName = ref('')
+const saving = ref(false)
+
+// A savable frame is one the device has actually rendered — the pre-frame
+// blank fallback in `flapAt` isn't a real frame and shouldn't get saved.
+const canSaveFrame = computed(
+  () => !!display.lastFrame.value?.valid && !!display.lastFrame.value.flaps
+)
+
+function openSave() {
+  saveName.value =
+    display.currentPresetName.value ? `${display.currentPresetName.value} copy` : ''
+  saveOpen.value = true
+}
+
+async function saveAsPreset() {
+  const name = saveName.value.trim()
+  if (!name) return
+  const frame = display.lastFrame.value
+  if (!frame?.valid || !frame.flaps) return
+  const bl = blankFlapId.value ?? 56
+  const flapsGrid = frame.flaps.map((row) =>
+    row.map((v) => (v == null || v < 0 ? bl : v))
+  )
+  saving.value = true
+  try {
+    const { data, error: err } = await apiClient.POST('/api/presets', {
+      body: { name, flaps: flapsGrid },
+    })
+    if (err) throw err
+    toast({
+      title: `Saved as "${data?.name ?? name}"`,
+      variant: 'success',
+    })
+    saveOpen.value = false
+    saveName.value = ''
+  } catch (e) {
+    toast({
+      title: "Couldn't save",
+      description: friendlyError(e),
+      variant: 'destructive',
+    })
+  } finally {
+    saving.value = false
   }
 }
 
@@ -210,7 +262,6 @@ async function runPreset(p: PresetMeta) {
               v-for="x in gridSize.width"
               :key="`${x}-${y}`"
               :flap-index="flapAt(x - 1, y - 1)"
-              animate
             />
           </template>
         </div>
@@ -236,6 +287,15 @@ async function runPreset(p: PresetMeta) {
           <Loader2 v-if="clearing" class="animate-spin" />
           <Eraser v-else />
           Clear
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          :disabled="!canSaveFrame"
+          @click="openSave"
+        >
+          <BookmarkPlus />
+          Save as preset
         </Button>
       </div>
     </section>
@@ -289,6 +349,41 @@ async function runPreset(p: PresetMeta) {
         </div>
       </CardContent>
     </Card>
+
+    <!-- Save as preset -->
+    <Dialog v-model:open="saveOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Save current display as a preset</DialogTitle>
+          <DialogDescription>
+            Captures whatever the wall is showing right now. You can push it
+            again from the Presets page or a schedule.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-1.5">
+          <Label for="save-preset-name">Name</Label>
+          <Input
+            id="save-preset-name"
+            v-model="saveName"
+            placeholder="Arrivals"
+            @keydown.enter="saveAsPreset"
+          />
+        </div>
+        <DialogFooter>
+          <DialogClose as-child>
+            <Button variant="ghost">Cancel</Button>
+          </DialogClose>
+          <Button
+            :disabled="!saveName.trim() || saving"
+            @click="saveAsPreset"
+          >
+            <Loader2 v-if="saving" class="animate-spin" />
+            <Save v-else />
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- Preset picker -->
     <Dialog v-model:open="pickerOpen">
