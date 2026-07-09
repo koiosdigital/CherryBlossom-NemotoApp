@@ -1512,16 +1512,27 @@ export interface components {
         PresetMeta: {
             id: number;
             name: string;
+            /**
+             * @description "static" stores a fixed flap array; "url" render-fetches
+             *     its frame from `url` on show. Absent on legacy responses ⇒ static.
+             * @enum {string}
+             */
+            source?: "static" | "url";
+            /** @description Static presets only (0 / absent for url presets). */
             width: number;
             height: number;
+            /** @description Present for url presets — the render URL fetched on show. */
+            url?: string;
         };
         PresetFull: components["schemas"]["PresetMeta"] & {
-            /** @description 2-D row-major, `width × height`, values 0-63. */
-            flaps: components["schemas"]["FlapIndex"][][];
+            /** @description Static presets only: 2-D row-major, `width × height`, values 0-63. */
+            flaps?: components["schemas"]["FlapIndex"][][];
         };
+        /** @description Create/replace body — either a static (`flaps`) or url (`url`) preset. */
         PresetBody: {
             name: string;
-            flaps: components["schemas"]["FlapIndex"][][];
+            flaps?: components["schemas"]["FlapIndex"][][];
+            url?: string;
         };
         /** @description Discriminated union on `type`. */
         ScheduleAction: components["schemas"]["SchedActionDisplayPreset"] | components["schemas"]["SchedActionDisplaySolid"] | components["schemas"]["SchedActionClear"];

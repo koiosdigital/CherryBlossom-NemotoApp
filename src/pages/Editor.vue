@@ -132,6 +132,12 @@ async function loadPreset(id: number) {
     router.push('/presets')
     return
   }
+  if (data.source === 'url' || !data.flaps) {
+    // URL presets have no flap grid to paint — they're edited from the list.
+    toast({ title: 'Edit URL presets from the Presets list', variant: 'default' })
+    router.push('/presets')
+    return
+  }
   presetName.value = data.name
   await ensureGridLoaded()
   const g = gridState.grid.value?.grid
